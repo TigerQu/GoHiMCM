@@ -289,6 +289,215 @@ class BuildingFireEnvironment:
         
         # Update node states
         self._update_agent_positions()
+
+    #all of the functions
+    def reset(self, fire_node: Optional[str] = None) -> Data:
+        """
+        Reset environment for a new episode (PPO requirement).
+        
+        Args:
+            fire_node: Node to ignite (None = random room, "none" = no fire)
+        
+        Returns:
+            Initial observation (PyG Data object)
+        """
+        # Reset time
+        self.time_step = 0
+        self.fire_spread_counter = 0
+        
+        # Reset statistics
+        self.stats = {
+            "people_rescued": 0,
+            "people_found": 0,
+            "nodes_swept": 0,
+            "total_search_time": 0,
+        }
+        
+        # Reset reward tracking
+        self._last_people_found = 0
+        self._last_nodes_swept = 0
+        self._last_people_alive = len(self.people)
+        self._last_people_rescued = 0
+        
+        # Reset all nodes
+        for node in self.nodes.values():
+            node.on_fire = False
+            node.smoky = False
+            node.swept = False
+            node.agent_here = False
+            node.obs_people_count = 0
+            node.obs_avg_hp = 0.0
+            node.people = []  # Clear people lists
+        
+        # Reset all people to initial state
+        for pid, (node_id, age, mobility, hp) in enumerate(self._initial_people_state):
+            person = self.people[pid]
+            person.hp = hp
+            person.seen = False
+            person.rescued = False
+            person.node_id = node_id
+            person.awareness_timer = 0
+            person.on_edge = False
+            person.edge_u = None
+            person.edge_v = None
+            person.edge_eta = 0.0
+            person.evac_distance = None
+            
+            # Re-add to node's people list
+            self.nodes[node_id].people.append(pid)
+        
+        # Reset agents to initial positions
+        for agent_id, start_pos in self._initial_agent_positions.items():
+            if agent_id in self.agents:
+                self.agents[agent_id].node_id = start_pos
+                self.agents[agent_id].searching = False
+                self.agents[agent_id].search_timer = 0
+        
+        self._update_agent_positions()
+        
+        # Start fire
+        if fire_node is None:
+            # Random room
+            rooms = [n.nid for n in self.nodes.values() if n.ntype == "room"]
+            if rooms:
+                fire_node = random.choice(rooms)
+                self.ignite_node(fire_node)
+        elif fire_node != "none":
+            self.ignite_node(fire_node)
+        
+        # Get initial observation
+        observation = self.get_observation()
+        return observation
+    
+    
+    def get_observation(self) -> Data:
+        """
+        Get current observation (PPO requirement).
+        
+        Returns:
+            PyG Data object with current graph state
+        """
+        observation, _ = self.to_pytorch_geometric()
+        return observation
+    
+    
+    def get_state(self) -> Dict:
+        """
+        Get full environment state (PPO requirement).
+        
+        Returns:
+            Dictionary with complete environment state
+        """
+        _, env_state = self.to_pytorch_geometric()
+        return env_state
+    
+    
+    def get_valid_actions(self, agent_id: int) -> List[str]:
+        """
+        Get valid actions for an agent (for action masking in PPO).
+        
+        Args:
+            agent_id: Agent ID
+        
+        Returns:
+            List of valid action strings
+        """
+        if agent_id not in self.agents:
+            return ["wait"]
+        
+        agent = self.agents[agent_id]
+        
+        # If searching, can only wait
+        if agent.searching:
+            return ["wait"]
+        
+        valid_actions = []
+        
+        # Can always search current location
+        valid_actions.append("search")
+        
+        # Can move to adjacent nodes
+        current = agent.node_id
+        for neighbor in self.G.neighbors(current):
+            valid_actions.append(f"move_{neighbor}")
+        
+        # Can wait (do nothing)
+        valid_actions.append("wait")
+        
+        return valid_actions
+    
+    
+    def do_action(self, actions: Dict[int, str]) -> Tuple[Data, float, bool, Dict]:
+        """
+        Execute actions and return (observation, reward, done, info) (PPO requirement).
+        
+        Args:
+            actions: Dict mapping agent_id to action string
+                     Format: "move_NODEID" | "search" | "wait"
+        
+        Returns:
+            observation: PyG Data object (next state)
+            reward: float (reward for this transition)
+            done: bool (episode terminated)
+            info: dict (additional information)
+        """
+        # Parse and execute agent actions
+        for agent_id, action_str in actions.items():
+            if agent_id not in self.agents:
+                continue
+            
+            if action_str.startswith("move_"):
+                target = action_str[5:]  # Remove "move_" prefix
+                self.move_agent(agent_id, target)
+            elif action_str == "search":
+                self.start_search(agent_id)
+            # "wait" does nothing
+        
+        # Advance environment by one step
+        self.step()
+        
+        # Compute reward
+        reward = self._compute_reward()
+        
+        # Check if episode is done
+        done = self._is_done()
+        
+        # Get next observation
+        observation = self.get_observation()
+        
+        # Collect info
+        info = {
+            "stats": self.get_statistics(),
+            "is_success": self.is_sweep_complete(),
+            "time_step": self.time_step,
+        }
+        
+        return observation, reward, done, info
+    
+    
+    
+    def _is_done(self) -> bool:
+        """
+        Check if episode should terminate.
+        
+        Termination conditions:
+        1. All rooms swept (success)
+        2. Max steps reached (timeout)
+        3. All people dead (optional early termination)
+        """
+        # Success: all rooms swept
+        if self.is_sweep_complete():
+            return True
+        
+        # Timeout
+        if self.time_step >= self.config["max_steps"]:
+            return True
+        
+        # All people dead (optional)
+        if all(not p.is_alive for p in self.people.values()):
+            return True
+        
+        return False
     
 
     # fire and smoke set up
