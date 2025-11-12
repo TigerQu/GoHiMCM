@@ -10,7 +10,8 @@ from torch_geometric.data import Data
 NODE_TYPES = {
     "room": 0,    # Regular rooms where people may be located
     "hall": 1,    # Hallways connecting rooms
-    "exit": 2     # Exit points of the building
+    "exit": 2,     # Exit points of the building
+    "floor": 3,    # Floor nodes for multi-story buildings
 }
 
 # Feature dimension: F = 10 as described in the specification
@@ -34,6 +35,10 @@ DEFAULT_CONFIG = {
     "child_speed": 0.9,              # m/s
     "adult_speed": 1.2,              # m/s
     "limited_speed": 0.7,            # m/s (elderly/disabled)
+
+    "child_anxiety": 2.0,            # Multiplier for HP loss in hazards
+    "adult_anxiety": 1.0,            # Multiplier for HP loss in
+    "limited_anxiety": 1.5,          # Multiplier for HP loss in hazards
 }
 
 
