@@ -1,9 +1,13 @@
+from .occupants import move_civilians as _move_civilians
+from .occupants import _shortest_distance_to_any_exit as _shortest_dist_exit
+
 from typing import Dict, List, Tuple, Optional
 import math, random, heapq
 import numpy as np
 import networkx as nx
 import torch
 from torch_geometric.data import Data
+
 
 from .config import DEFAULT_CONFIG, FEATURE_DIM, NODE_TYPES
 from .entities import Person, NodeMeta, EdgeMeta, Agent
@@ -74,6 +78,7 @@ class BuildingFireEnvironment:
         # RNG for determinism
         self._rng = random.Random()
         self._np_rng = np.random.RandomState()
+        
         
     # construct building
     
@@ -469,7 +474,7 @@ class BuildingFireEnvironment:
                         self.stats["people_found"] += 1
 
                         # Compute shortest distance to any exit at discovery time
-                        person.evac_distance = self._shortest_distance_to_any_exit(person.node_id)
+                        person.evac_distance = _shortest_dist_exit(self, person.node_id)
 
                         # If still alive at discovery, count as evacuated success immediately
                         if person.is_alive and not person.rescued:
@@ -715,9 +720,9 @@ class BuildingFireEnvironment:
             self.fire_spread_counter,
             self.config["fire_spread_delay"]
         )
-
         # Move civilians
-        self.move_civilians()
+        _move_civilians(self)
+
         
         # Health degradation
         _degrade_health(
