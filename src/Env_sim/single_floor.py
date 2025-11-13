@@ -5,6 +5,8 @@ import numpy as np
 import networkx as nx
 import torch
 from torch_geometric.data import Data
+import numpy as np
+import networkx as nx
 from typing import List, Dict, Tuple, Optional
 import heapq
 import math
@@ -34,7 +36,6 @@ DEFAULT_CONFIG = {
     # Agent parameters
     "agent_speed": 1.0,              # Nodes per time step (simplified)
     "search_time": 1,                # Time steps to search a node
-    "max_steps": 500,                 # Max steps per episode
     
     # People parameters (for future evacuation modeling)
     "child_speed": 0.9,              # m/s
@@ -96,6 +97,7 @@ class Person:
     #person properties
     v_class: float = 1.2
     evac_distance: Optional[float] = None  # shortest path length to any exit at discovery
+    rescued: bool = False
     evac_path: Optional[List[str]] = None
 
     
@@ -1192,13 +1194,10 @@ class BuildingFireEnvironment:
         
         # Spread hazards
         self.spread_hazards()
-
-        # Move civilians
-        self.move_civilians()
         
         # Health degradation
         self.degrade_health()
-
+        
         # Advance time
         self.time_step += 1
     
@@ -1379,7 +1378,7 @@ def build_standard_office_layout() -> BuildingFireEnvironment:
     
     return env
 
-"""
+
 if __name__ == "__main__":
     print("Building Fire Evacuation Simulation")
     print("=" * 60)
@@ -1401,99 +1400,3 @@ if __name__ == "__main__":
     print(f"  Edge features: {pyg_data.edge_attr.shape}")
     print(f"\nNode features (first 3 nodes):")
     print(pyg_data.x[:3])
-"""
-
-if __name__ == "__main__":
-    print("Building Fire Evacuation Simulation (no-reward test)")
-    print("=" * 60)
-
-    # 1) 构建环境 + 固定随机种子方便复现
-    env = build_standard_office_layout()
-    env.seed(42)
-
-    # 2) 重置：点火到指定房间（或 fire_node=None 随机房间）
-    env.reset(fire_node="RT1", seed=42)
-
-    # 3) 一个非常简单的“动作生成器”（只为 smoke test，不追求最优）
-    def pick_actions(env):
-        """
-        返回 {agent_id: action_str}，action_str 只会是：
-        - "search"
-        - "move_<NEIGHBOR_NODE_ID>"
-        - "wait"
-        """
-        actions = {}
-        for aid, agent in env.agents.items():
-            nid = agent.node_id
-            node = env.nodes[nid]
-
-            # 如果当前在 room 且未扫过 → 先 search
-            if node.ntype == "room" and not node.swept:
-                actions[aid] = "search"
-                continue
-
-            # 否则优先去相邻“未扫过的 room”，找不到就去任一邻居
-            neighbors = list(env.G.neighbors(nid))
-
-            # 先挑未扫过的 room
-            target = None
-            for nb in neighbors:
-                if env.nodes[nb].ntype == "room" and not env.nodes[nb].swept:
-                    target = nb
-                    break
-
-            # 次选：未扫过的 hall
-            if target is None:
-                for nb in neighbors:
-                    if env.nodes[nb].ntype == "hall" and not env.nodes[nb].swept:
-                        target = nb
-                        break
-
-            # 实在没有就随便动一个邻居；没有邻居就 wait
-            if target is None and neighbors:
-                target = neighbors[0]
-
-            if target is None:
-                actions[aid] = "wait"
-            else:
-                actions[aid] = f"move_{target}"
-
-        return actions
-
-    # 4) 主循环：只推进若干步，不计算 reward
-    MAX_TEST_STEPS = 20
-    for t in range(MAX_TEST_STEPS):
-        # 选动作（不考虑 reward，仅作演示）
-        actions = pick_actions(env)
-
-        # ——不调用 do_action（它会触发 _compute_reward）——
-        # 手动执行动作：
-        for aid, act in actions.items():
-            if act.startswith("move_"):
-                target = act[5:]
-                env.move_agent(aid, target)
-            elif act == "search":
-                env.start_search(aid)
-            # "wait" 什么也不做
-
-        # 推进一步（含：process_searches → spread_hazards → move_civilians → degrade_health → time++)
-        env.step()
-
-        # 打印当前步的关键信息
-        s = env.get_statistics()
-        print(f"[T={env.time_step:02d}] "
-              f"swept={s['nodes_swept']}, found={s['people_found']}, "
-              f"rescued={s['people_rescued']}, alive={s['people_alive']}, "
-              f"sweep_complete={s['sweep_complete']}")
-
-        # 也可以看看 agent 位置
-        for aid, ag in env.agents.items():
-            print(f"  - Agent {aid} @ {ag.node_id}")
-
-        # 所有房间扫完就提前结束
-        if s["sweep_complete"]:
-            print("Sweep complete. Stop early.")
-            break
-
-    print("\nFinal status:")
-    env.print_status()
