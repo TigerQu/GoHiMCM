@@ -5,6 +5,12 @@ import numpy as np
 import networkx as nx
 import torch
 from torch_geometric.data import Data
+import numpy as np
+import networkx as nx
+from typing import List, Dict, Tuple, Optional
+import heapq
+import math
+
 
 # Node type encoding for one-hot vectors 
 NODE_TYPES = {
@@ -36,9 +42,20 @@ DEFAULT_CONFIG = {
     "adult_speed": 1.2,              # m/s
     "limited_speed": 0.7,            # m/s (elderly/disabled)
 
+<<<<<<< HEAD:src/environment.py
     "child_anxiety": 2.0,            # Multiplier for HP loss in hazards
     "adult_anxiety": 1.0,            # Multiplier for HP loss in
     "limited_anxiety": 1.5,          # Multiplier for HP loss in hazards
+=======
+    # Civilian behavior
+    "awareness_delay_mean": 3,  # Time steps before moving
+    "awareness_delay_std": 1,
+    
+    # Dynamic pathfinding weights
+    "theta_density": 0.8,  # Congestion sensitivity
+    "hazard_penalty_fire": 100.0,  # Avoid fire
+    "hazard_penalty_smoke": 10.0,  # Discourage smoke
+>>>>>>> 094f329 (updated env with moving human):src/Env_sim/single floor.py
 }
 
 
@@ -66,12 +83,16 @@ class Person:
     rescued: bool = False
     node_id: Optional[str] = None
     awareness_timer: int = 0
+    #movement state
     on_edge: bool = False
     edge_u: Optional[str] = None
     edge_v: Optional[str] = None
     edge_eta: float = 0.0
+    #person properties
     v_class: float = 1.2
     evac_distance: Optional[float] = None  # shortest path length to any exit at discovery
+    rescued: bool = False
+    evac_path: Optional[List[str]] = None
 
     
     @property
@@ -200,6 +221,24 @@ class BuildingFireEnvironment:
             "total_search_time": 0,
         }
 
+        # Reward tracking
+        self._last_people_found = 0
+        self._last_nodes_swept = 0
+        self._last_people_alive = 0
+        self._last_people_rescued = 0
+        
+        # For reset
+        self._initial_agent_positions: Dict[int, str] = {}
+        self._initial_people_state: List[Tuple[str, int, str, float]] = []
+        
+        # Edge load tracking (for congestion)
+        self._edge_load: Dict[Tuple[str, str], int] = {}
+        
+        # RNG for determinism
+        self._rng = random.Random()
+        self._np_rng = np.random.RandomState()
+        
+
     def _shortest_distance_to_any_exit(self, start_node: str) -> Optional[float]:
         exits = [nid for nid, meta in self.nodes.items() if meta.ntype == 'exit']
         if not exits:
@@ -256,25 +295,34 @@ class BuildingFireEnvironment:
     
     
     def spawn_person(self, node_id: str, age: int, mobility: str, hp: float = 100.0) -> int:
-        """
-        Add a person to the building at the specified location.
-        
-        Args:
-            node_id: Node where person starts
-            age: Age in years
-            mobility: Mobility category ('child', 'adult', 'limited')
-            hp: Initial health points (default 100)
-        
-        Returns:
-            Person ID (integer)
-        """
+        """Spawn person at location."""
         if node_id not in self.nodes:
             raise ValueError(f"Node {node_id} does not exist")
         
         pid = len(self.people)
-        person = Person(pid=pid, age=age, mobility=mobility, hp=hp, node_id=node_id)
+        speed_map = {
+            'adult': self.config['adult_speed'],
+            'child': self.config['child_speed'],
+            'limited': self.config['limited_speed']
+        }
+        v_class = speed_map.get(mobility, self.config['adult_speed'])
+        
+        # Sample awareness delay
+        delay = max(0, int(self._np_rng.normal(
+            self.config['awareness_delay_mean'],
+            self.config['awareness_delay_std']
+        )))
+        
+        person = Person(
+            pid=pid, age=age, mobility=mobility, hp=hp,
+            node_id=node_id, v_class=v_class, awareness_timer=delay
+        )
         self.people[pid] = person
         self.nodes[node_id].people.append(pid)
+        
+        # Store for reset
+        self._initial_people_state.append((node_id, age, mobility, hp))
+        
         return pid
     
     
@@ -291,12 +339,20 @@ class BuildingFireEnvironment:
         
         agent = Agent(agent_id=agent_id, node_id=node_id)
         self.agents[agent_id] = agent
-        
+        self._initial_agent_positions[agent_id] = node_id     
         # Update node states
         self._update_agent_positions()
 
+    def seed(self, seed: Optional[int] = None) -> None:
+        """Set random seed for deterministic behavior."""
+        if seed is not None:
+            self._rng = random.Random(seed)
+            self._np_rng = np.random.RandomState(seed)
+            random.seed(seed)
+            np.random.seed(seed)
+
     #all of the functions
-    def reset(self, fire_node: Optional[str] = None) -> Data:
+    def reset(self, fire_node: Optional[str] = None, seed: Optional[int] = None) -> Data:
         """
         Reset environment for a new episode (PPO requirement).
         
@@ -306,6 +362,9 @@ class BuildingFireEnvironment:
         Returns:
             Initial observation (PyG Data object)
         """
+        if seed is not None:
+            self.seed(seed)
+
         # Reset time
         self.time_step = 0
         self.fire_spread_counter = 0
@@ -323,6 +382,9 @@ class BuildingFireEnvironment:
         self._last_nodes_swept = 0
         self._last_people_alive = len(self.people)
         self._last_people_rescued = 0
+
+        # Reset edge load
+        self._edge_load.clear()
         
         # Reset all nodes
         for node in self.nodes.values():
@@ -341,7 +403,14 @@ class BuildingFireEnvironment:
             person.seen = False
             person.rescued = False
             person.node_id = node_id
-            person.awareness_timer = 0
+
+            # Re-sample awareness delay
+            delay = max(0, int(self._np_rng.normal(
+                self.config['awareness_delay_mean'],
+                self.config['awareness_delay_std']
+            )))
+            
+            person.awareness_timer = delay
             person.on_edge = False
             person.edge_u = None
             person.edge_v = None
@@ -398,39 +467,32 @@ class BuildingFireEnvironment:
     
     
     def get_valid_actions(self, agent_id: int) -> List[str]:
-        """
-        Get valid actions for an agent (for action masking in PPO).
-        
-        Args:
-            agent_id: Agent ID
-        
-        Returns:
-            List of valid action strings
-        """
+        """Get valid actions for agent (action masking)."""
         if agent_id not in self.agents:
             return ["wait"]
         
         agent = self.agents[agent_id]
-        
-        # If searching, can only wait
         if agent.searching:
             return ["wait"]
         
-        valid_actions = []
-        
-        # Can always search current location
-        valid_actions.append("search")
-        
-        # Can move to adjacent nodes
+        valid_actions = ["search"]
         current = agent.node_id
         for neighbor in self.G.neighbors(current):
             valid_actions.append(f"move_{neighbor}")
-        
-        # Can wait (do nothing)
         valid_actions.append("wait")
         
         return valid_actions
     
+    def get_agent_node_index(self, agent_id: int) -> Optional[int]:
+        """Get node index where agent is located."""
+        if agent_id not in self.agents:
+            return None
+        agent = self.agents[agent_id]
+        node_ids = list(self.nodes.keys())
+        try:
+            return node_ids.index(agent.node_id)
+        except ValueError:
+            return None
     
     def do_action(self, actions: Dict[int, str]) -> Tuple[Data, float, bool, Dict]:
         """
@@ -587,6 +649,195 @@ class BuildingFireEnvironment:
                 person.hp = max(0.0, person.hp - hp_loss)
                 if not person.is_alive:
                     print(f"[T={self.time_step}] Person {person.pid} died at {person.node_id}")
+
+    def move_civilians(self) -> None:
+        """
+        Move civilians toward exits using dynamic pathfinding.
+        
+        Logic per image requirements:
+        1. Awareness delay: some wait before moving
+        2. Dynamic shortest path: minimize time-dependent cost
+           c_e(t) = length/v_class * (1 + θ·density) + hazard_penalty
+        3. Re-route if blocked or visibility drops
+        """
+        # Progress people on edges
+        for person in self.people.values():
+            if not person.is_alive or person.rescued:
+                continue
+            
+            if person.on_edge:
+                person.edge_eta -= 1.0
+                
+                if person.edge_eta <= 0:
+                    # Arrival
+                    self._edge_dec(person.edge_u, person.edge_v)
+                    person.on_edge = False
+                    person.node_id = person.edge_v
+                    person.edge_u = None
+                    person.edge_v = None
+                    person.edge_eta = 0.0
+                    
+                    # Check if reached exit
+                    if self.nodes[person.node_id].ntype == 'exit':
+                        person.rescued = True
+                        self.stats['people_rescued'] += 1
+        
+        # Start movement for idle, aware people
+        for person in self.people.values():
+            if not person.is_alive or person.rescued or person.on_edge:
+                continue
+            
+            # Awareness delay
+            if person.awareness_timer > 0:
+                person.awareness_timer -= 1
+                continue
+            
+            # Only move if seen (aware)
+            if not person.seen:
+                continue
+            
+            # Get next node on path
+            next_node = self._person_route_next(person)
+            
+            if next_node is None:
+                continue
+            
+            # Check if blocked by fire
+            next_node_meta = self.nodes[next_node]
+            if next_node_meta.on_fire:
+                continue  # Don't enter fire
+            
+            # Start traversing edge
+            edge_meta: EdgeMeta = self.G.edges[person.node_id, next_node]['meta']
+            cost = self._edge_cost_for_person(person, person.node_id, next_node, edge_meta)
+            
+            if math.isinf(cost):
+                continue  # Blocked
+            
+            # Start movement
+            person.on_edge = True
+            person.edge_u = person.node_id
+            person.edge_v = next_node
+            person.edge_eta = max(1.0, cost)
+            self._edge_inc(person.edge_u, person.edge_v)
+    
+    def _person_route_next(self, person: Person) -> Optional[str]:
+        """
+        Get next node for person using dynamic Dijkstra.
+        
+        Returns next node ID on shortest path to nearest exit.
+        """
+        exits = [nid for nid, meta in self.nodes.items() if meta.ntype == 'exit']
+        if not exits:
+            return None
+        
+        # Dijkstra from person's location
+        dist = {n: float('inf') for n in self.G.nodes}
+        prev = {n: None for n in self.G.nodes}
+        dist[person.node_id] = 0.0
+        
+        pq = [(0.0, person.node_id)]
+        
+        while pq:
+            d, u = heapq.heappop(pq)
+            if d > dist[u]:
+                continue
+            
+            # Early exit if reached an exit
+            if self.nodes[u].ntype == 'exit':
+                break
+            
+            for v in self.G.neighbors(u):
+                edge_meta: EdgeMeta = self.G.edges[u, v]['meta']
+                cost = self._edge_cost_for_person(person, u, v, edge_meta)
+                
+                if math.isinf(cost):
+                    continue
+                
+                nd = d + cost
+                if nd < dist[v]:
+                    dist[v] = nd
+                    prev[v] = u
+                    heapq.heappush(pq, (nd, v))
+        
+        # Find nearest exit
+        nearest_exit = min(exits, key=lambda e: dist[e], default=None)
+        
+        if nearest_exit is None or math.isinf(dist[nearest_exit]):
+            return None
+        
+        # Backtrack to find next step
+        current = nearest_exit
+        while prev[current] is not None:
+            if prev[current] == person.node_id:
+                return current
+            current = prev[current]
+        
+        return None
+    
+    def _edge_cost_for_person(self, person: Person, u: str, v: str, edge_meta: EdgeMeta) -> float:
+        """
+        Compute time-dependent edge cost for person.
+        
+        Formula: c_e(t) = length/v_class * (1 + θ·density) + hazard_penalty
+        """
+        # Base traversal time
+        base_time = edge_meta.length / max(person.v_class, 1e-6)
+        
+        # Congestion factor
+        density = self._edge_density(u, v)
+        theta = self.config['theta_density']
+        congestion_factor = 1.0 + theta * density
+        
+        # Hazard penalties
+        hazard_penalty = 0.0
+        u_node = self.nodes[u]
+        v_node = self.nodes[v]
+        
+        if u_node.on_fire or v_node.on_fire:
+            hazard_penalty = self.config['hazard_penalty_fire']
+        elif u_node.smoky or v_node.smoky:
+            hazard_penalty = self.config['hazard_penalty_smoke']
+        
+        return base_time * congestion_factor + hazard_penalty
+    
+    def _edge_density(self, u: str, v: str) -> float:
+        """Compute edge density (people per meter)."""
+        count = self._edge_load.get((u, v), 0)
+        edge_meta: EdgeMeta = self.G.edges[u, v]['meta']
+        length = max(edge_meta.length, 1e-6)
+        return count / length
+    
+    def _edge_inc(self, u: str, v: str) -> None:
+        """Increment edge load."""
+        key = (u, v)
+        self._edge_load[key] = self._edge_load.get(key, 0) + 1
+    
+    def _edge_dec(self, u: str, v: str) -> None:
+        """Decrement edge load."""
+        key = (u, v)
+        if key in self._edge_load:
+            self._edge_load[key] = max(0, self._edge_load[key] - 1)
+    
+    def _shortest_distance_to_any_exit(self, start_node: str) -> Optional[float]:
+        """Compute shortest distance to any exit."""
+        exits = [nid for nid, meta in self.nodes.items() if meta.ntype == 'exit']
+        if not exits:
+            return None
+        
+        def weight(u, v, edata):
+            meta = edata.get("meta", None)
+            return getattr(meta, "length", 1.0) if meta is not None else 1.0
+        
+        best = None
+        for ex in exits:
+            try:
+                dist = nx.dijkstra_path_length(self.G, start_node, ex, weight=weight)
+                if best is None or dist < best:
+                    best = dist
+            except nx.NetworkXNoPath:
+                continue
+        return best
     
 
     # Agent Actions
@@ -769,6 +1020,9 @@ class BuildingFireEnvironment:
         for node in self.nodes.values():
             raw_dist = distances.get(node.nid, 10.0)  # Default 10m if unreachable
             node.dist_to_fire_norm = min(raw_dist / 10.0, 1.0)  # Normalize and cap
+
+    
+
     
     
     def get_node_features(self, node: NodeMeta) -> np.ndarray:
@@ -1119,8 +1373,6 @@ def build_standard_office_layout() -> BuildingFireEnvironment:
     return env
 
 
-
-"""
 if __name__ == "__main__":
     print("Building Fire Evacuation Simulation")
     print("=" * 60)
@@ -1142,4 +1394,3 @@ if __name__ == "__main__":
     print(f"  Edge features: {pyg_data.edge_attr.shape}")
     print(f"\nNode features (first 3 nodes):")
     print(pyg_data.x[:3])
-"""
