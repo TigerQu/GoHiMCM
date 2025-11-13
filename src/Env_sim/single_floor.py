@@ -41,14 +41,11 @@ DEFAULT_CONFIG = {
     "adult_speed": 1.2,              # m/s
     "limited_speed": 0.7,            # m/s (elderly/disabled)
 
-<<<<<<<< HEAD:src/Env_sim/single floor.py
-<<<<<<< HEAD:src/environment.py
+
     "child_anxiety": 2.0,            # Multiplier for HP loss in hazards
     "adult_anxiety": 1.0,            # Multiplier for HP loss in
     "limited_anxiety": 1.5,          # Multiplier for HP loss in hazards
-=======
-========
->>>>>>>> refs/remotes/origin/main:src/Env_sim/single_floor.py
+
     # Civilian behavior
     "awareness_delay_mean": 3,  # Time steps before moving
     "awareness_delay_std": 1,
@@ -57,10 +54,6 @@ DEFAULT_CONFIG = {
     "theta_density": 0.8,  # Congestion sensitivity
     "hazard_penalty_fire": 100.0,  # Avoid fire
     "hazard_penalty_smoke": 10.0,  # Discourage smoke
-<<<<<<<< HEAD:src/Env_sim/single floor.py
->>>>>>> 094f329 (updated env with moving human):src/Env_sim/single floor.py
-========
->>>>>>>> refs/remotes/origin/main:src/Env_sim/single_floor.py
 }
 
 
