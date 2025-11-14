@@ -41,6 +41,9 @@ class BuildingFireEnvironment:
         """
         # Configuration
         self.config = {**DEFAULT_CONFIG, **(config or {})}
+        self.config.setdefault("sweep_node_types", {"room"})    # only rooms must be searched
+        self.config.setdefault("auto_sweep_types", {"hall", "exit"})  # halls/exits auto-sweep
+        self.config.setdefault("auto_sweep_on_visit", True)     # stepping onto them marks swept
         
         # Building topology
         self.G = nx.Graph()                    # NetworkX graph for topology
@@ -410,6 +413,7 @@ class BuildingFireEnvironment:
         agent.search_timer = 0
         
         self._update_agent_positions()
+        self._maybe_auto_sweep_current_node(self.nodes[target_node_id])
         return True
     
     
@@ -460,7 +464,8 @@ class BuildingFireEnvironment:
                agent.searching = False
                node = self.nodes[agent.node_id]
                
-               if not node.swept:
+               if node.ntype in self.config.get("sweep_node_types", {"room"}):
+                if not node.swept:
                     node.swept = True
                     self.stats["nodes_swept"] += 1
 
@@ -736,15 +741,22 @@ class BuildingFireEnvironment:
     
     
     def is_sweep_complete(self) -> bool:
-        """
-        Check if the building sweep is complete.
-        
-        A sweep is complete when all nodes have been searched (swept).
-        
-        Returns:
-            True if all nodes are swept, False otherwise
-        """
-        return all(node.swept for node in self.nodes.values())
+        sweep_kinds = self.config.get("sweep_node_types", {"room"})
+        targets = [n for n in self.nodes.values() if n.ntype in sweep_kinds]
+        # If there are zero targets, define completion as False (or True if you prefer)
+        return len(targets) > 0 and all(n.swept for n in targets)
+    
+
+    
+    def _maybe_auto_sweep_current_node(self, agent_node: "NodeMeta") -> None:
+        if not self.config.get("auto_sweep_on_visit", True):
+            return
+        if agent_node.ntype in self.config.get("auto_sweep_types", {"hall", "exit"}):
+            if not agent_node.swept:
+               agent_node.swept = True
+               self.stats["nodes_swept"] += 1
+
+
     
     
     def get_statistics(self) -> Dict:
