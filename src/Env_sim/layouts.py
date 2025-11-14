@@ -112,8 +112,8 @@ def build_standard_office_layout() -> BuildingFireEnvironment:
 def build_two_floor_warehouse() -> BuildingFireEnvironment:
     """
     Additional layout: compact two-floor warehouse with stairs and two exits.
-    - Floor 0: corridor C0–C2 with two storage rooms S0,S1; EXIT_F0
-    - Floor 1: corridor C3–C5 with two storage rooms S2,S3; EXIT_F1
+    - Floor 0: corridor C0 - C2 with two storage rooms S0,S1; EXIT_F0
+    - Floor 1: corridor C3 - C5 with two storage rooms S2,S3; EXIT_F1
     - Stairs connect C1 <-> C4 (bidirectional)
     """
     env = BuildingFireEnvironment()
