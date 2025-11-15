@@ -109,6 +109,90 @@ def build_standard_office_layout() -> BuildingFireEnvironment:
     return env
 
 
+def build_babycare_layout() -> BuildingFireEnvironment:
+    """
+    Build a multi-floor (5 floors) babycare center layout.
+
+    Features per floor:
+    - A central corridor with multiple segments
+    - Several nurseries (rooms for infants)
+    - Nurse stations/rooms
+    - Play area and sleeping room
+    - Small kitchen / service room
+    - Elevator and stairs connecting floors
+    - Ground-floor emergency exits
+
+    Returns:
+        Initialized BuildingFireEnvironment for babycare center
+    """
+    env = BuildingFireEnvironment()
+
+    FLOORS = 5
+    # For each floor create 3 corridor segments (C0, C1, C2), 3 nurseries, 1 nurse room, 1 play area, 1 kitchen
+    for f in range(FLOORS):
+        # Corridors
+        for i in range(3):
+            env.add_node(nid=f"F{f}_C{i}", ntype="hall", length=8.0, area=16.0, floor=f)
+
+        # Connect corridor segments on same floor
+        env.add_edge(f"F{f}_C0", f"F{f}_C1", length=8.0, width=2.2, door=False)
+        env.add_edge(f"F{f}_C1", f"F{f}_C2", length=8.0, width=2.2, door=False)
+
+        # Nurseries (3 per floor)
+        for r in range(3):
+            nid = f"F{f}_NUR{r}"
+            env.add_node(nid=nid, ntype="nursery", length=5.0, area=20.0, floor=f)
+            env.add_edge(nid, f"F{f}_C{r}", length=1.0, width=1.0, door=True)
+
+        # Nurse room (one per floor, connected to central corridor)
+        nurse_nid = f"F{f}_NURSE"
+        env.add_node(nid=nurse_nid, ntype="nurse_room", length=4.0, area=12.0, floor=f)
+        env.add_edge(nurse_nid, f"F{f}_C1", length=1.0, width=1.0, door=True)
+
+        # Play area
+        play_nid = f"F{f}_PLAY"
+        env.add_node(nid=play_nid, ntype="play_area", length=6.0, area=24.0, floor=f)
+        env.add_edge(play_nid, f"F{f}_C2", length=1.0, width=1.2, door=True)
+
+        # Kitchen / service
+        kit_nid = f"F{f}_KITCHEN"
+        env.add_node(nid=kit_nid, ntype="kitchen", length=4.0, area=10.0, floor=f)
+        env.add_edge(kit_nid, f"F{f}_C0", length=1.0, width=1.0, door=True)
+
+    # Connect vertical circulation: stairs between floors
+    for f in range(FLOORS - 1):
+        # Stairs between central corridors (C1 of each floor)
+        env.add_edge(f"F{f}_C1", f"F{f+1}_C1", length=4.0, width=1.6, slope=35.0, door=False)
+
+    # Ground floor exits (connected to corridor segments)
+    env.add_node(nid="EXIT_G_LEFT", ntype="exit", length=3.0, area=6.0, floor=0)
+    env.add_node(nid="EXIT_G_RIGHT", ntype="exit", length=3.0, area=6.0, floor=0)
+    env.add_edge("EXIT_G_LEFT", "F0_C0", length=1.0, width=1.6, door=True)
+    env.add_edge("EXIT_G_RIGHT", "F0_C2", length=1.0, width=1.6, door=True)
+
+    # Rooftop emergency access on top floor
+    env.add_node(nid=f"F{FLOORS-1}_ROOF_EXIT", ntype="roof_exit", length=2.0, area=4.0, floor=FLOORS-1)
+    env.add_edge(f"F{FLOORS-1}_ROOF_EXIT", f"F{FLOORS-1}_C2", length=1.0, width=1.0, door=True)
+
+    # Populate with staff and infants for realism
+    # Place nurses near nurse rooms and some infants in nurseries
+    for f in range(FLOORS):
+        # One nurse per floor
+        env.spawn_person(f"F{f}_NURSE", age=36, mobility="staff", hp=100.0)
+
+        # Few infants and caregivers in nurseries
+        for r in range(3):
+            # caregiver
+            env.spawn_person(f"F{f}_NUR{r}", age=28 + r, mobility="adult", hp=100.0)
+            # infant (mobility set to 'infant' so environment logic can treat specially)
+            env.spawn_person(f"F{f}_NUR{r}", age=1, mobility="infant", hp=100.0)
+
+    # Place a few agents (evacuation managers) on ground-floor exits
+    env.place_agent(agent_id=0, node_id="EXIT_G_LEFT")
+    env.place_agent(agent_id=1, node_id="EXIT_G_RIGHT")
+
+    return env
+
 def build_two_floor_warehouse() -> BuildingFireEnvironment:
     """
     Additional layout: compact two-floor warehouse with stairs and two exits.
@@ -164,3 +248,4 @@ def build_two_floor_warehouse() -> BuildingFireEnvironment:
     env.place_agent(1, "EXIT_F1")
 
     return env
+
