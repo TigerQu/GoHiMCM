@@ -1,6 +1,9 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
 
+# Import default config for fallback speed multipliers
+from .config import DEFAULT_CONFIG
+
 # DATA CLASSES
 
 @dataclass
@@ -34,6 +37,23 @@ class Person:
     v_class: float = 1.2
     evac_distance: Optional[float] = None  # shortest path length to any exit at discovery
     evac_path: Optional[List[str]] = None
+    # Assistance / panic state
+    being_assisted: bool = False
+    assisting_agent_id: Optional[int] = None
+    panicked: bool = False
+
+    @property
+    def effective_speed(self) -> float:
+        """Compute effective walking speed (m/s) for the person.
+
+        Priority: assisted > panicked > normal
+        Uses DEFAULT_CONFIG as a fallback; environment config may vary.
+        """
+        if self.being_assisted:
+            return self.v_class * DEFAULT_CONFIG.get('assisted_speed_multiplier', 1.0)
+        if self.panicked:
+            return self.v_class * DEFAULT_CONFIG.get('panic_speed_reduction', 1.0)
+        return self.v_class
 
     
     @property
@@ -114,3 +134,10 @@ class Agent:
     path: List[str] = field(default_factory=list)
     searching: bool = False
     search_timer: int = 0
+    # movement state (in-transit along an edge)
+    on_edge: bool = False
+    edge_u: Optional[str] = None
+    edge_v: Optional[str] = None
+    edge_eta: float = 0.0
+    # If agent is escorting a person, store that person's id
+    assisting_person_id: Optional[int] = None

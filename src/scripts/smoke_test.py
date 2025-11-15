@@ -1,6 +1,8 @@
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import networkx as nx
+
 from Env_sim.layouts import build_standard_office_layout
 from Env_sim.env import BuildingFireEnvironment
 
@@ -28,7 +30,35 @@ if __name__ == "__main__":
             nid = agent.node_id
             node = env.nodes[nid]
 
+            # If agent is currently assisting someone, escort them to nearest exit
+            if agent.assisting_person_id is not None:
+                # Find nearest exit and take the first step along shortest path
+                exits = [nid for nid, m in env.nodes.items() if m.ntype == "exit"]
+                if exits:
+                    try:
+                        nearest = min(exits, key=lambda e: nx.shortest_path_length(
+                            env.G, nid, e, weight=lambda u, v, d: d['meta'].length
+                        ))
+                        path = nx.shortest_path(env.G, nid, nearest, weight=lambda u, v, d: d['meta'].length)
+                        if len(path) > 1:
+                            actions[aid] = f"move_{path[1]}"
+                            continue
+                    except Exception:
+                        # Fall through to regular behavior if path search fails
+                        pass
+
             # 如果当前在 room 且未扫过 → 先 search
+            # If there are discovered, unassisted people here, help them first
+            assisted = False
+            for pid in node.people:
+                p = env.people[pid]
+                if p.is_alive and p.seen and not p.being_assisted and not p.rescued:
+                    actions[aid] = f"assist_{pid}"
+                    assisted = True
+                    break
+            if assisted:
+                continue
+
             if node.ntype == "room" and not node.swept:
                 actions[aid] = "search"
                 continue
@@ -98,3 +128,28 @@ if __name__ == "__main__":
 
     print("\nFinal status:")
     env.print_status()
+
+
+from Env_sim.env import BuildingFireEnvironment
+
+env = BuildingFireEnvironment()
+
+# Build minimal layout
+env.add_node("R1", "room", length=5.0)
+env.add_node("E1", "exit", length=5.0)
+env.add_edge("R1", "E1", length=5.0, width=1.0)
+
+# One person in R1
+env.spawn_person("R1", age=30, mobility="adult", hp=100.0)
+
+# Make awareness delay zero for testing
+env.config["awareness_delay_mean"] = 0.0
+env.config["awareness_delay_std"] = 0.0
+
+env.reset(fire_node="none", seed=0)
+
+for t in range(20):
+    env.step()
+    stats = env.get_statistics()
+    print(f"t={t:2d} alive={stats['people_alive']} rescued={stats['people_rescued']}")
+
