@@ -481,11 +481,6 @@ class BuildingFireEnvironment:
                         # Compute shortest distance to any exit at discovery time
                         person.evac_distance = _shortest_dist_exit(self, person.node_id)
 
-                        # If still alive at discovery, count as evacuated success immediately
-                        if person.is_alive and not person.rescued:
-                            person.rescued = True
-                            self.stats["people_rescued"] += 1
-
     
     # Oberservation and feature extraction
     
@@ -738,6 +733,11 @@ class BuildingFireEnvironment:
 
         # Advance time
         self.time_step += 1
+
+        num_rescued_flags = sum(1 for p in self.people.values() if p.rescued)
+        assert num_rescued_flags == self.stats["people_rescued"], \
+            f"Mismatch: flags={num_rescued_flags}, stats={self.stats['people_rescued']}"
+
     
     
     def is_sweep_complete(self) -> bool:

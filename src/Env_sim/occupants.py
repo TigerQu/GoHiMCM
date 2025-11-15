@@ -35,7 +35,7 @@ def move_civilians(self) -> None:
                         person.rescued = True
                         self.stats['people_rescued'] += 1
         
-        # Start movement for idle, aware people
+                # Start movement for idle, aware people
         for person in self.people.values():
             if not person.is_alive or person.rescued or person.on_edge:
                 continue
@@ -43,10 +43,6 @@ def move_civilians(self) -> None:
             # Awareness delay
             if person.awareness_timer > 0:
                 person.awareness_timer -= 1
-                continue
-            
-            # Only move if seen (aware)
-            if not person.seen:
                 continue
             
             # Get next node on path
