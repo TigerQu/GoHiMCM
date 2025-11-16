@@ -12,49 +12,82 @@ FEATURE_DIM = 11
 
 # Default configuration values
 DEFAULT_CONFIG = {
-    # Hazard spreading parameters
-    "fire_spread_prob": 0.15,        # Reduced from 0.3 - more realistic spread
-    "fire_spread_delay": 5,          # Increased from 2 - fire spreads slower
-    "fire_intensity_init": 1.0,      # Initial fire intensity (0-1)
-    "smoke_density_base": 0.5,       # Base smoke density when fire starts
-    "fire_intensity_growth": 0.05,    # How much fire intensity increases per timestep
-    "smoke_density_growth": 0.02,     # How much smoke density increases per timestep
+ 
+    # HAZARD SPREADING PARAMETERS
+ 
+    "fire_spread_prob": 0.15,        # Base probability of fire spreading to adjacent node (15%)
+    "fire_spread_delay": 5,          # Timesteps between fire spread attempts (realistic spread rate)
     
-    # Health degradation parameters (per timestep, 1 timestep = ~5 seconds)
-    "hp_loss_fire": 1.0,             # Reduced from 5.0 - people survive ~8 minutes in fire
-    "hp_loss_smoke": 0.3,            # Reduced from 2.0 - smoke is dangerous but slower
-    "hp_mult_adult": 1.0,            # Health multiplier for adults
-    "hp_mult_child": 0.8,            # Health multiplier for children (more vulnerable)
-    "hp_mult_limited": 0.6,          # Health multiplier for people with limited mobility
-    "responder_Xi_max": 1.0,         # Max exposure index for agents
-    "responder_exposure_fire": 0.1,  # Agent exposure to fire per timestep
-    "responder_exposure_smoke": 0.05, # Agent exposure to smoke per timestep
-    "responder_hp_loss_fire": 0.2,   # Agent HP loss in fire
-    "responder_hp_loss_smoke": 0.05, # Agent HP loss in smoke
+    # ===== CHANGE 7: Fire intensity configuration (NEW) =====
+    # These parameters control continuous fire/smoke intensity modeling (0-1 scale)
+    # instead of binary on/off states, enabling more realistic hazard representation
+    "fire_intensity_init": 0.4,      # Initial fire intensity when node ignites (0.4 = moderate start)
+    "fire_intensity_growth": 0.1,    # Intensity increase per spread cycle (grows to 1.0 over time)
+    "smoke_density_base": 0.3,       # Initial smoke density when smoke appears (0.3 = light smoke)
+    "smoke_density_growth": 0.1,     # Smoke density increase per cycle (accumulates over time)
+  
+    # CIVILIAN HEALTH DEGRADATION PARAMETERS (per timestep, 1 timestep ≈ 5 seconds)
+ 
+    "hp_loss_fire": 1.0,             # Base HP loss in fire (1.0 HP/timestep → ~8 min survival in fire)
+    "hp_loss_smoke": 0.3,            # Base HP loss in smoke (0.3 HP/timestep → ~27 min in smoke)
     
-    # Agent parameters (1 timestep = ~5 seconds)
-    "agent_speed": 1.5,              # m/s (walking speed with gear)
-    "search_time_per_sqm": 0.5,      # Seconds per square meter (more realistic)
-    "max_steps": 500,                # ~40 minutes max episode
+    # ===== CHANGE 8: Mobility-specific vulnerability multipliers (NEW) =====
+    # These multipliers account for physiological differences in hazard tolerance:
+    # - Children: smaller body mass, faster metabolism → more vulnerable (1.5x damage)
+    # - Limited mobility: pre-existing health conditions → more vulnerable (1.8x damage)
+    # - Adults: baseline healthy adult tolerance (1.0x damage)
+    # 
+    # Final damage = base_hp_loss * intensity * mobility_multiplier
+    # Example: Child in full fire → 1.0 * 1.0 * 1.5 = 1.5 HP/timestep (5.3 min survival)
+    "hp_mult_child": 1.5,            # Children 50% more vulnerable
+    "hp_mult_adult": 1.0,            # Adults baseline
+    "hp_mult_limited": 1.8,          # Limited mobility 80% more vulnerable
+   
+    # RESPONDER SAFETY PARAMETERS (NEW)
+  
+    # ===== CHANGE 9: Responder exposure tracking (NEW) =====
+    # Models cumulative exposure ξ_j(t) and enforces safety withdrawal protocols.
+    # Responders must withdraw when:
+    #   1. Cumulative exposure exceeds Xi_max (too much smoke/heat exposure)
+    #   2. HP depletes to 0 (responder injured)
+    #
+    # This creates a resource constraint forcing triage decisions in policy learning.
+    "responder_hp_loss_fire": 0.5,   # HP loss per timestep in fire (slower than civilians due to gear)
+    "responder_hp_loss_smoke": 0.2,  # HP loss per timestep in smoke (protective equipment helps)
+    "responder_exposure_fire": 1.0,  # Exposure increment in fire (1.0 per timestep)
+    "responder_exposure_smoke": 0.3, # Exposure increment in smoke (0.3 per timestep)
+    "responder_Xi_max": 100.0,       # Maximum cumulative exposure before forced withdrawal
+                                      # At default rates: ~100 timesteps in fire, ~333 in smoke
+    # GENERAL SIMULATION PARAMETERS
+ 
+    "agent_speed": 1.5,              # Movement speed in m/s (walking with gear)
+    "search_time_per_sqm": 0.5,      # Search time per square meter (thorough room search)
+    "max_steps": 500,                # Maximum episode length (~42 minutes real-time)
     
-    # People parameters
-    "child_speed": 0.5,              # Reduced - children move slower, especially in fear
-    "adult_speed": 0.8,              # Reduced - people move cautiously in fire
-    "limited_speed": 0.4,            # Reduced - mobility impaired
-    "assisted_speed_multiplier": 1.8, # Speed boost when assisted by agent
+ 
+    # CIVILIAN MOVEMENT PARAMETERS
+  
+    "child_speed": 0.5,              # Children move slowly, especially when scared (m/s)
+    "adult_speed": 0.8,              # Adults move cautiously in fire/smoke (m/s)
+    "limited_speed": 0.4,            # Limited mobility (wheelchair, elderly, etc.) (m/s)
+    "assisted_speed_multiplier": 1.8, # Speed boost when assisted by responder (confidence)
 
-    # Civilian behavior
-    "awareness_delay_mean": 5,       # Increased - people take time to react
-    "awareness_delay_std": 2,        # More variation
-    "panic_speed_reduction": 0.7,    # People slow down when panicked (not yet assisted)
     
-    # Dynamic pathfinding weights
-    "theta_density": 0.8,            # Congestion sensitivity
-    "hazard_penalty_fire": 100.0,    # Avoid fire
-    "hazard_penalty_smoke": 10.0,    # Discourage smoke
+    # CIVILIAN BEHAVIOR PARAMETERS
+   
+    "awareness_delay_mean": 5,       # Mean timesteps before civilian reacts to alarm
+    "awareness_delay_std": 2,        # Standard deviation (some react faster than others)
+    "panic_speed_reduction": 0.7,    # Speed reduction when panicked (before being assisted)
     
-    # Sweep configuration
-    "sweep_node_types": {"room"},    # Only rooms need thorough search
-    "auto_sweep_types": {"hall", "exit"},  # Auto-sweep on visit
-    "auto_sweep_on_visit": True,
+    # PATHFINDING AND MOVEMENT PENALTIES
+
+    "theta_density": 0.8,            # Congestion sensitivity (how much crowding slows movement)
+    "hazard_penalty_fire": 100.0,    # Path cost penalty for fire (effectively blocks path)
+    "hazard_penalty_smoke": 10.0,    # Path cost penalty for smoke (discourage but passable)
+    
+    
+    # SWEEP CONFIGURATION
+    "sweep_node_types": {"room"},    # Node types that require thorough search
+    "auto_sweep_types": {"hall", "exit"},  # Node types that auto-sweep on visit
+    "auto_sweep_on_visit": True,     # Whether to mark auto-sweep nodes as swept immediately
 }
