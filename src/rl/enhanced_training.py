@@ -1,0 +1,549 @@
+"""
+Enhanced PPO training with logging, checkpointing, and evaluation.
+
+===== MAJOR IMPROVEMENTS FROM ORIGINAL =====
+1. Structured configuration with PPOConfig
+2. Proper logging to CSV and TensorBoard
+3. Model checkpointing (save/load)
+4. Separate evaluation episodes
+5. Train/eval layout splits
+6. Best model tracking
+"""
+
+import sys, os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+import torch
+import torch.nn.functional as F
+import torch.optim as optim
+import numpy as np
+from typing import List, Dict, Tuple
+import random
+
+from environment.layouts import (
+    build_standard_office_layout,
+    build_babycare_layout,
+    build_two_floor_warehouse
+)
+from rl.new_ppo import Policy, Value
+from rl.reward_shaper import RewardShaper
+from rl.logging_utils import ExperimentLogger
+from rl.ppo_config import PPOConfig
+
+
+class EnhancedPPOTrainer:
+    """
+    Complete PPO trainer with all production features.
+    
+    ===== IMPROVEMENTS OVER ORIGINAL =====
+    1. Uses PPOConfig for all hyperparameters
+    2. Tracks best model with checkpointing
+    3. Separate train/eval layout splits
+    4. Proper logging infrastructure
+    5. Evaluation mode with deterministic actions
+    """
+    
+    def __init__(self, config: PPOConfig):
+        """
+        Initialize trainer with structured config.
+        
+        ===== CHANGE 5: Config-driven initialization =====
+        All hyperparameters now come from PPOConfig.
+        """
+        self.config = config
+        
+        # Set random seeds for reproducibility
+        self._set_seeds(config.seed)
+        
+        # ===== Initialize networks =====
+        self.policy = Policy(
+            num_agents=config.num_agents,
+            max_actions=config.max_actions
+        )
+        self.value = Value(num_agents=config.num_agents)
+        
+        # ===== Optimizers =====
+        self.policy_optimizer = optim.Adam(
+            self.policy.parameters(),
+            lr=config.lr_policy
+        )
+        self.value_optimizer = optim.Adam(
+            self.value.parameters(),
+            lr=config.lr_value
+        )
+        
+        # ===== Reward shaper =====
+        self.reward_shaper = RewardShaper.for_scenario(config.scenario)
+        
+        # ===== Environment =====
+        self.env = self._create_env(config.scenario)
+        
+        # ===== CHANGE 6: Train/eval layout splits =====
+        # Generate layout seeds for train/eval separation
+        self.train_layout_seeds = list(range(1000, 1000 + config.num_train_layouts))
+        self.eval_layout_seeds = list(range(2000, 2000 + config.num_eval_layouts))
+        random.shuffle(self.train_layout_seeds)
+        
+        # ===== CHANGE 7: Logging infrastructure =====
+        self.logger = ExperimentLogger(
+            log_dir="logs",
+            experiment_name=config.experiment_name,
+            use_tensorboard=config.use_tensorboard
+        )
+        
+        # ===== CHANGE 8: Best model tracking =====
+        self.best_eval_return = float('-inf')
+        self.checkpoint_dir = os.path.join(self.logger.exp_dir, "checkpoints")
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        
+        # Save config
+        config.save(os.path.join(self.logger.exp_dir, "config.json"))
+        
+        print(f"🚀 Initialized {config.scenario} trainer")
+        print(f"   Train layouts: {config.num_train_layouts}")
+        print(f"   Eval layouts: {config.num_eval_layouts}")
+    
+    
+    def _set_seeds(self, seed: int):
+        """Set all random seeds for reproducibility."""
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
+    
+    
+    def _create_env(self, scenario: str):
+        """Create environment for scenario."""
+        if scenario == "office":
+            return build_standard_office_layout()
+        elif scenario == "daycare":
+            return build_babycare_layout()
+        elif scenario == "warehouse":
+            return build_two_floor_warehouse()
+        else:
+            raise ValueError(f"Unknown scenario: {scenario}")
+    
+    
+    def collect_rollout(
+        self,
+        num_steps: int,
+        deterministic: bool = False,
+        layout_seed: int = None,
+    ) -> Dict:
+        """
+        Collect one rollout with optional layout randomization.
+        
+        ===== CHANGE 9: Added layout seed parameter =====
+        Enables train/eval split and domain randomization.
+        
+        Args:
+            num_steps: Maximum steps per episode
+            deterministic: If True, use greedy actions
+            layout_seed: Seed for environment reset (for reproducibility)
+        """
+        # Reset with specific seed
+        obs = self.env.reset(seed=layout_seed)
+        self.reward_shaper.reset()
+        
+        # Storage
+        observations = []
+        agent_indices_list = []
+        actions_list = []
+        log_probs_list = []
+        rewards_list = []
+        dones_list = []
+        values_list = []
+        
+        done = False
+        step = 0
+        
+        while not done and step < num_steps:
+            # Get agent positions
+            agent_indices = torch.tensor([
+                self.env.get_agent_node_index(i)
+                for i in range(self.config.num_agents)
+            ])
+            
+            # Get valid actions
+            valid_actions_list = [
+                self.env.get_valid_actions(i)
+                for i in range(self.config.num_agents)
+            ]
+            
+            # Select actions
+            with torch.no_grad():
+                actions, log_probs, action_probs = self.policy.select_actions(
+                    obs, agent_indices, valid_actions_list, deterministic
+                )
+            
+            # Get value estimate
+            with torch.no_grad():
+                values = self.value(obs, agent_indices)
+            
+            # Convert to env format
+            action_dict = {}
+            for i in range(self.config.num_agents):
+                action_idx = actions[i].item()
+                action_str = self._idx_to_action_str(
+                    action_idx,
+                    valid_actions_list[i]
+                )
+                action_dict[i] = action_str
+            
+            # Execute
+            obs_next, _, done, info = self.env.do_action(action_dict)
+            reward = self.reward_shaper.compute_reward(self.env)
+            
+            # Store
+            observations.append(obs)
+            agent_indices_list.append(agent_indices)
+            actions_list.append(actions)
+            log_probs_list.append(log_probs)
+            rewards_list.append(torch.tensor(reward))
+            dones_list.append(torch.tensor(float(done)))
+            values_list.append(values)
+            
+            obs = obs_next
+            step += 1
+        
+        # Bootstrap value
+        agent_indices = torch.tensor([
+            self.env.get_agent_node_index(i)
+            for i in range(self.config.num_agents)
+        ])
+        with torch.no_grad():
+            final_value = self.value(obs, agent_indices)
+        
+        # Get episode summary
+        episode_stats = self.reward_shaper.get_episode_summary(self.env)
+        episode_return = torch.stack(rewards_list).sum().item()
+        
+        return {
+            'observations': observations,
+            'agent_indices': agent_indices_list,
+            'actions': torch.stack(actions_list),
+            'log_probs': torch.stack(log_probs_list),
+            'rewards': torch.stack(rewards_list),
+            'dones': torch.stack(dones_list),
+            'values': torch.cat(values_list),
+            'final_value': final_value,
+            'episode_stats': episode_stats,
+            'episode_return': episode_return,
+        }
+    
+    
+    def _idx_to_action_str(self, action_idx: int, valid_actions: List[str]) -> str:
+        """Map action index to string."""
+        if action_idx == 0:
+            return "wait"
+        elif action_idx == 1:
+            return "search"
+        else:
+            move_actions = [a for a in valid_actions if a.startswith("move_")]
+            if move_actions:
+                return move_actions[min(action_idx - 2, len(move_actions) - 1)]
+            return "wait"
+    
+    
+    def compute_advantages(
+        self,
+        rewards: torch.Tensor,
+        dones: torch.Tensor,
+        values: torch.Tensor,
+        final_value: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute GAE advantages."""
+        T = rewards.size(0)
+        values_reshaped = values.view(T, self.config.num_agents)
+        values_avg = values_reshaped.mean(dim=1)
+        final_value_avg = final_value.mean()
+        
+        values_with_bootstrap = torch.cat([values_avg, final_value_avg.unsqueeze(0)])
+        
+        advantages = Policy.gae(
+            rewards, dones, values_with_bootstrap,
+            gamma=self.config.gamma,
+            lambda_=self.config.gae_lambda
+        )
+        
+        returns = advantages + values_avg
+        
+        advantages = advantages.unsqueeze(1).expand(-1, self.config.num_agents).reshape(-1)
+        returns = returns.unsqueeze(1).expand(-1, self.config.num_agents).reshape(-1)
+        
+        return advantages, returns
+    
+    
+    def update_policy(
+        self,
+        observations: List,
+        agent_indices_list: List[torch.Tensor],
+        actions: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        advantages: torch.Tensor,
+        returns: torch.Tensor,
+    ) -> Dict[str, float]:
+        """Update policy and value networks."""
+        T = actions.size(0)
+        total_policy_loss = 0.0
+        total_value_loss = 0.0
+        total_entropy = 0.0
+        
+        for epoch in range(self.config.num_ppo_epochs):
+            all_log_probs = []
+            all_action_probs = []
+            all_values = []
+            
+            for t in range(T):
+                obs = observations[t]
+                agent_indices = agent_indices_list[t]
+                
+                action_logits, _ = self.policy(obs, agent_indices)
+                action_probs = F.softmax(action_logits, dim=-1)
+                log_probs = torch.log(
+                    action_probs[torch.arange(self.config.num_agents), actions[t]] + 1e-8
+                )
+                
+                all_log_probs.append(log_probs)
+                all_action_probs.append(action_probs)
+                
+                value = self.value(obs, agent_indices)
+                all_values.append(value)
+            
+            new_log_probs = torch.cat(all_log_probs)
+            new_action_probs = torch.cat(all_action_probs)
+            new_values = torch.cat(all_values)
+            old_log_probs_flat = old_log_probs.reshape(-1)
+            
+            policy_loss = Policy.policy_loss(
+                advantages, old_log_probs_flat, new_log_probs,
+                clip_epsilon=self.config.clip_epsilon
+            )
+            
+            value_loss = Value.value_loss(new_values, returns)
+            entropy = Policy.entropy_bonus(new_action_probs)
+            
+            loss = (
+                policy_loss +
+                self.config.value_loss_coef * value_loss -
+                self.config.entropy_coef * entropy
+            )
+            
+            self.policy_optimizer.zero_grad()
+            self.value_optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                self.policy.parameters(),
+                self.config.max_grad_norm
+            )
+            torch.nn.utils.clip_grad_norm_(
+                self.value.parameters(),
+                self.config.max_grad_norm
+            )
+            self.policy_optimizer.step()
+            self.value_optimizer.step()
+            
+            total_policy_loss += policy_loss.item()
+            total_value_loss += value_loss.item()
+            total_entropy += entropy.item()
+        
+        return {
+            'policy_loss': total_policy_loss / self.config.num_ppo_epochs,
+            'value_loss': total_value_loss / self.config.num_ppo_epochs,
+            'entropy': total_entropy / self.config.num_ppo_epochs,
+        }
+    
+    
+    def evaluate(self, num_episodes: int = None) -> Dict[str, float]:
+        """
+        Run evaluation episodes on held-out layouts.
+        
+        ===== CHANGE 10: Separate evaluation mode =====
+        Uses deterministic actions and eval layout seeds.
+        
+        Args:
+            num_episodes: Number of eval episodes (default from config)
+            
+        Returns:
+            summary: Aggregated evaluation metrics
+        """
+        if num_episodes is None:
+            num_episodes = self.config.num_eval_episodes
+        
+        returns = []
+        stats_list = []
+        
+        print(f"🔍 Running evaluation ({num_episodes} episodes)...")
+        
+        for ep in range(num_episodes):
+            # Use eval layout seeds
+            layout_seed = self.eval_layout_seeds[ep % len(self.eval_layout_seeds)]
+            
+            rollout = self.collect_rollout(
+                num_steps=self.config.steps_per_rollout,
+                deterministic=True,  # Greedy actions for evaluation
+                layout_seed=layout_seed
+            )
+            
+            returns.append(rollout['episode_return'])
+            stats_list.append(rollout['episode_stats'])
+        
+        # Aggregate statistics
+        summary = {
+            'return_mean': np.mean(returns),
+            'return_std': np.std(returns),
+            'people_rescued_mean': np.mean([s['people_rescued'] for s in stats_list]),
+            'people_found_mean': np.mean([s['people_found'] for s in stats_list]),
+            'people_alive_mean': np.mean([s['people_alive'] for s in stats_list]),
+            'nodes_swept_mean': np.mean([s['nodes_swept'] for s in stats_list]),
+            'high_risk_redundancy_mean': np.mean([s['high_risk_redundancy'] for s in stats_list]),
+            'sweep_complete_rate': np.mean([s['sweep_complete'] for s in stats_list]),
+            'episode_length_mean': np.mean([s['time_step'] for s in stats_list]),
+        }
+        
+        print(f"✅ Eval complete: return={summary['return_mean']:.2f}±{summary['return_std']:.2f}")
+        
+        return summary
+    
+    
+    def save_checkpoint(self, iteration: int, is_best: bool = False, extra: Dict = None):
+        """
+        Save model checkpoint.
+        
+        ===== CHANGE 11: Model checkpointing =====
+        Saves policy, value, optimizer states, and metadata.
+        """
+        checkpoint = {
+            'iteration': iteration,
+            'policy_state': self.policy.state_dict(),
+            'value_state': self.value.state_dict(),
+            'policy_optimizer_state': self.policy_optimizer.state_dict(),
+            'value_optimizer_state': self.value_optimizer.state_dict(),
+            'config': self.config.to_dict(),
+            'best_eval_return': self.best_eval_return,
+            'extra': extra or {},
+        }
+        
+        # Save regular checkpoint
+        checkpoint_path = os.path.join(
+            self.checkpoint_dir,
+            f"checkpoint_iter{iteration}.pt"
+        )
+        torch.save(checkpoint, checkpoint_path)
+        
+        # Save best checkpoint
+        if is_best:
+            best_path = os.path.join(self.checkpoint_dir, "best_model.pt")
+            torch.save(checkpoint, best_path)
+            print(f"💾 New best model saved: {best_path}")
+    
+    
+    def load_checkpoint(self, path: str):
+        """Load model checkpoint."""
+        checkpoint = torch.load(path, map_location='cpu')
+        self.policy.load_state_dict(checkpoint['policy_state'])
+        self.value.load_state_dict(checkpoint['value_state'])
+        self.policy_optimizer.load_state_dict(checkpoint['policy_optimizer_state'])
+        self.value_optimizer.load_state_dict(checkpoint['value_optimizer_state'])
+        self.best_eval_return = checkpoint['best_eval_return']
+        print(f"✅ Loaded checkpoint from {path}")
+        return checkpoint
+    
+    
+    def train(self):
+        """
+        Main training loop with logging, eval, and checkpointing.
+        
+        ===== CHANGE 12: Complete training pipeline =====
+        Integrates all improvements: logging, eval, checkpointing.
+        """
+        print(f"\n{'='*60}")
+        print(f"🎯 Starting training: {self.config.experiment_name}")
+        print(f"{'='*60}\n")
+        
+        for iteration in range(self.config.num_iterations):
+            # Sample random training layout
+            layout_seed = random.choice(self.train_layout_seeds)
+            
+            # Collect rollout
+            rollout = self.collect_rollout(
+                num_steps=self.config.steps_per_rollout,
+                layout_seed=layout_seed
+            )
+            
+            # Compute advantages
+            advantages, returns = self.compute_advantages(
+                rollout['rewards'],
+                rollout['dones'],
+                rollout['values'],
+                rollout['final_value']
+            )
+            
+            # Update policy
+            losses = self.update_policy(
+                rollout['observations'],
+                rollout['agent_indices'],
+                rollout['actions'],
+                rollout['log_probs'],
+                advantages,
+                returns
+            )
+            
+            # Log training metrics
+            if iteration % self.config.log_interval == 0:
+                self.logger.log_iteration(
+                    iteration,
+                    losses,
+                    rollout['episode_stats'],
+                    rollout['episode_return']
+                )
+                
+                print(f"Iter {iteration:4d} | "
+                      f"Return: {rollout['episode_return']:7.2f} | "
+                      f"Policy Loss: {losses['policy_loss']:7.4f} | "
+                      f"Rescued: {rollout['episode_stats']['people_rescued']:2d} | "
+                      f"Redundancy: {rollout['episode_stats']['high_risk_redundancy']:.2f}")
+            
+            # Evaluate and checkpoint
+            if (iteration + 1) % self.config.eval_interval == 0:
+                eval_summary = self.evaluate()
+                self.logger.log_eval(iteration, eval_summary)
+                
+                # Check if best model
+                is_best = eval_summary['return_mean'] > self.best_eval_return
+                if is_best:
+                    self.best_eval_return = eval_summary['return_mean']
+                
+                self.save_checkpoint(
+                    iteration,
+                    is_best=is_best,
+                    extra=eval_summary
+                )
+            
+            # Regular checkpoint
+            if (iteration + 1) % self.config.checkpoint_interval == 0:
+                self.save_checkpoint(iteration)
+        
+        # Final evaluation
+        print("\n" + "="*60)
+        print("🏁 Training complete! Running final evaluation...")
+        print("="*60 + "\n")
+        
+        final_eval = self.evaluate(num_episodes=50)
+        self.logger.log_eval(self.config.num_iterations, final_eval)
+        
+        print(f"\n📊 Final Results:")
+        print(f"   Return: {final_eval['return_mean']:.2f} ± {final_eval['return_std']:.2f}")
+        print(f"   People Rescued: {final_eval['people_rescued_mean']:.1f}")
+        print(f"   High-Risk Redundancy: {final_eval['high_risk_redundancy_mean']:.2%}")
+        print(f"   Sweep Complete Rate: {final_eval['sweep_complete_rate']:.2%}")
+        
+        self.logger.close()
+
+
+if __name__ == "__main__":
+    # Example: Train on office with default config
+    config = PPOConfig.get_default("office")
+    trainer = EnhancedPPOTrainer(config)
+    trainer.train()
