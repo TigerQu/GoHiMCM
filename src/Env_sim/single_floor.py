@@ -1455,7 +1455,7 @@ if __name__ == "__main__":
         return actions
 
     # 4) 主循环：只推进若干步，不计算 reward
-    MAX_TEST_STEPS = 20
+    MAX_TEST_STEPS = 1000
     for t in range(MAX_TEST_STEPS):
         # 选动作（不考虑 reward，仅作演示）
         actions = pick_actions(env)
