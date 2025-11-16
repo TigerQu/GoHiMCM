@@ -113,7 +113,7 @@ class BuildingFireEnvironment:
 
         # Deactivate if over exposure limit or HP depleted
         if agent.exposure > Xi_max or agent.hp <= 0.0:
-            agent.active = 
+            agent.active = False
             
         # Add this new method to BuildingFireEnvironment class:
     def compute_high_risk_redundancy(self) -> float:
