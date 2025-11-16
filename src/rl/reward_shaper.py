@@ -310,12 +310,12 @@ class RewardShaper:
         stats = env.get_statistics()
         
         return {
-            'people_rescued': stats['people_rescued'],
-            'people_found': stats['people_found'],
-            'people_alive': stats['people_alive'],
-            'nodes_swept': stats['nodes_swept'],
-            'high_risk_redundancy': stats['high_risk_redundancy'],
-            'sweep_complete': stats['sweep_complete'],
-            'active_agents': stats['active_agents'],
-            'time_step': stats['time_step'],
+            'people_rescued': stats.get('people_rescued', 0),
+            'people_found': stats.get('people_found', 0),
+            'people_alive': stats.get('people_alive', 0),
+            'nodes_swept': stats.get('nodes_swept', 0),
+            'high_risk_redundancy': stats.get('high_risk_redundancy', 0),
+            'sweep_complete': stats.get('sweep_complete', False),
+            'active_agents': stats.get('active_agents', 0),
+            'time_step': stats.get('time_step', 0),
         }

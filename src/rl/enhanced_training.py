@@ -99,7 +99,7 @@ class EnhancedPPOTrainer:
         # Save config
         config.save(os.path.join(self.logger.exp_dir, "config.json"))
         
-        print(f"🚀 Initialized {config.scenario} trainer")
+        print(f"Initialized {config.scenario} trainer")
         print(f"   Train layouts: {config.num_train_layouts}")
         print(f"   Eval layouts: {config.num_eval_layouts}")
     
@@ -374,7 +374,7 @@ class EnhancedPPOTrainer:
         returns = []
         stats_list = []
         
-        print(f"🔍 Running evaluation ({num_episodes} episodes)...")
+        print(f"Running evaluation ({num_episodes} episodes)...")
         
         for ep in range(num_episodes):
             # Use eval layout seeds
@@ -402,7 +402,7 @@ class EnhancedPPOTrainer:
             'episode_length_mean': np.mean([s['time_step'] for s in stats_list]),
         }
         
-        print(f"✅ Eval complete: return={summary['return_mean']:.2f}±{summary['return_std']:.2f}")
+        print(f"Eval complete: return={summary['return_mean']:.2f}±{summary['return_std']:.2f}")
         
         return summary
     
@@ -436,7 +436,7 @@ class EnhancedPPOTrainer:
         if is_best:
             best_path = os.path.join(self.checkpoint_dir, "best_model.pt")
             torch.save(checkpoint, best_path)
-            print(f"💾 New best model saved: {best_path}")
+            print(f"New best model saved: {best_path}")
     
     
     def load_checkpoint(self, path: str):
@@ -447,7 +447,7 @@ class EnhancedPPOTrainer:
         self.policy_optimizer.load_state_dict(checkpoint['policy_optimizer_state'])
         self.value_optimizer.load_state_dict(checkpoint['value_optimizer_state'])
         self.best_eval_return = checkpoint['best_eval_return']
-        print(f"✅ Loaded checkpoint from {path}")
+        print(f"Loaded checkpoint from {path}")
         return checkpoint
     
     
@@ -459,7 +459,7 @@ class EnhancedPPOTrainer:
         Integrates all improvements: logging, eval, checkpointing.
         """
         print(f"\n{'='*60}")
-        print(f"🎯 Starting training: {self.config.experiment_name}")
+        print(f"Starting training: {self.config.experiment_name}")
         print(f"{'='*60}\n")
         
         for iteration in range(self.config.num_iterations):
@@ -527,13 +527,13 @@ class EnhancedPPOTrainer:
         
         # Final evaluation
         print("\n" + "="*60)
-        print("🏁 Training complete! Running final evaluation...")
+        print("Training complete! Running final evaluation...")
         print("="*60 + "\n")
         
         final_eval = self.evaluate(num_episodes=50)
         self.logger.log_eval(self.config.num_iterations, final_eval)
         
-        print(f"\n📊 Final Results:")
+        print(f"\nFinal Results:")
         print(f"   Return: {final_eval['return_mean']:.2f} ± {final_eval['return_std']:.2f}")
         print(f"   People Rescued: {final_eval['people_rescued_mean']:.1f}")
         print(f"   High-Risk Redundancy: {final_eval['high_risk_redundancy_mean']:.2%}")

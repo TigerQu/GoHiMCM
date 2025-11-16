@@ -40,7 +40,7 @@ class PPOConfig:
     max_grad_norm: float = 0.5             # Gradient clipping threshold
     
     # Training configuration
-    num_iterations: int = 100              # Total training iterations
+    num_iterations: int = 10000            # Total training iterations
     steps_per_rollout: int = 100           # Max steps per episode
     num_ppo_epochs: int = 4                # PPO update epochs per iteration
     num_parallel_envs: int = 1             # Number of parallel environments (1=no parallel)
@@ -88,7 +88,7 @@ class PPOConfig:
             return cls(
                 scenario="office",
                 experiment_name="office_baseline",
-                num_iterations=100,
+                num_iterations=10000,
                 steps_per_rollout=100,
             )
         
@@ -96,7 +96,7 @@ class PPOConfig:
             return cls(
                 scenario="daycare",
                 experiment_name="daycare_baseline",
-                num_iterations=150,          # More iterations for complex scenario
+                num_iterations=10000,         # More iterations for complex scenario
                 steps_per_rollout=150,       # Longer episodes
                 entropy_coef=0.02,           # Higher exploration for multi-floor
             )
@@ -105,7 +105,7 @@ class PPOConfig:
             return cls(
                 scenario="warehouse",
                 experiment_name="warehouse_baseline",
-                num_iterations=120,
+                num_iterations=10000,
                 steps_per_rollout=120,
                 lr_policy=1e-4,              # Lower LR for sparse rewards
             )
@@ -172,7 +172,7 @@ def create_scenario_configs():
         config.lr_policy = best_lr
         config.entropy_coef = best_entropy
         config.clip_epsilon = best_clip
-        config.num_iterations = 200  # Longer training for final runs
+        config.num_iterations = 10000  # Longer training for final runs
         configs.append(config)
     
     return configs
