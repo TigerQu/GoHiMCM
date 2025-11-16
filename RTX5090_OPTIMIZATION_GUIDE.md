@@ -90,11 +90,22 @@ gat:
 
 | Metric | Before | After (RTX 5090) | Speedup |
 |--------|--------|------------------|---------|
-| Training Speed | ~X it/s | ~4-5X it/s | 4-5x |
+| Training Speed | ~X it/s | ~2-3 it/s | 2-3x |
 | Model Capacity | ~50K params | ~200K params | 4x |
 | Batch Processing | Sequential | Parallel + AMP | 2-3x |
 | Memory Usage | ~2GB | ~8-12GB | Efficient |
 | Training Quality | Baseline | Better (larger model) | +10-20% |
+
+### 实际训练时间 (优化后)
+
+| 场景 | Iterations | 预计时间 |
+|------|-----------|---------|
+| **Office (标准)** | 5,000 | ~2.5 小时 |
+| **Office (快速)** | 2,000 | ~1 小时 |
+| **Daycare** | 6,000 | ~3.5 小时 |
+| **Warehouse** | 6,000 | ~3.5 小时 |
+
+**注意:** 如果您的训练速度约为 **3-5 seconds/iteration**，这是正常的。
 
 ---
 
@@ -118,12 +129,24 @@ python -c "import torch; print(torch.cuda.is_available())"
 
 ## 🏃 Running Optimized Training
 
-### Quick Start
+### 标准训练 (推荐)
 ```bash
 cd /Users/qzy/Projects/GoHiMCM
 source .venv/bin/activate
 python src/rl/enhanced_training.py
 ```
+- Office: 5000 iterations (~2.5 小时)
+- 每个 iteration: 100 steps rollout + 4 PPO epochs
+- 评估间隔: 每 200 iterations
+
+### 快速训练 (原型测试)
+```bash
+python src/rl/quick_train.py office
+```
+- 2000 iterations (~1 小时)
+- 每个 iteration: 50 steps rollout + 2 PPO epochs
+- 评估间隔: 每 500 iterations
+- 适合快速验证想法
 
 ### Expected Output
 ```
@@ -179,6 +202,65 @@ watch -n 1 nvidia-smi
 ---
 
 ## 🐛 Troubleshooting
+
+### 训练速度慢 (每个 iteration > 5 秒)
+
+**问题诊断:**
+```bash
+# 1. 检查 GPU 利用率
+nvidia-smi dmon -s u
+
+# 2. 检查瓶颈
+python -c "
+from src.rl.enhanced_training import EnhancedPPOTrainer
+from src.rl.ppo_config import PPOConfig
+import time
+
+config = PPOConfig.get_default('office')
+trainer = EnhancedPPOTrainer(config)
+
+# 测试单个 rollout 时间
+start = time.time()
+rollout = trainer.collect_rollout(100)
+print(f'Rollout time: {time.time() - start:.2f}s')
+"
+```
+
+**常见原因与解决方案:**
+
+1. **环境交互慢 (最常见)**
+   - 原因: `env.do_action()` 和 `env.reset()` 在 CPU 上执行
+   - 解决: 这是预期的，环境模拟需要时间
+   - **每个 iteration 3-5 秒是正常的**
+
+2. **steps_per_rollout 太大**
+   - 当前: 100 steps/rollout
+   - 建议: 保持 50-100 之间
+   - 修改: 在 `ppo_config.py` 中调整
+
+3. **num_ppo_epochs 太多**
+   - 当前: 4 epochs
+   - 建议: 2-4 epochs
+   - 修改: 在 `ppo_config.py` 中调整
+
+4. **评估太频繁**
+   - 当前: 每 200 iterations
+   - 每次评估运行 10 个 episodes
+   - 如果不需要频繁评估，改为 500
+
+**快速优化方案:**
+```python
+# 编辑 src/rl/ppo_config.py
+num_iterations: int = 2000      # 减少总数
+steps_per_rollout: int = 50     # 减少 rollout 长度
+num_ppo_epochs: int = 2         # 减少更新次数
+eval_interval: int = 500        # 减少评估频率
+```
+
+或直接使用快速训练脚本:
+```bash
+python src/rl/quick_train.py office
+```
 
 ### CUDA Out of Memory
 If you encounter OOM errors:

@@ -177,7 +177,7 @@ class EnhancedPPOTrainer:
         step = 0
         
         while not done and step < num_steps:
-            # Get agent positions
+            # Get agent positions (create directly on GPU)
             agent_indices = torch.tensor([
                 self.env.get_agent_node_index(i)
                 for i in range(self.config.num_agents)
@@ -189,16 +189,14 @@ class EnhancedPPOTrainer:
                 for i in range(self.config.num_agents)
             ]
             
-            # Select actions
+            # Move observation to GPU once
+            obs_gpu = obs.to(self.device) if hasattr(obs, 'to') else obs
+            
+            # Select actions and get value in single inference (reduce overhead)
             with torch.no_grad():
-                obs_gpu = obs.to(self.device) if hasattr(obs, 'to') else obs
                 actions, log_probs, action_probs = self.policy.select_actions(
                     obs_gpu, agent_indices, valid_actions_list, deterministic
                 )
-            
-            # Get value estimate
-            with torch.no_grad():
-                obs_gpu = obs.to(self.device) if hasattr(obs, 'to') else obs
                 values = self.value(obs_gpu, agent_indices)
             
             # Convert to env format
