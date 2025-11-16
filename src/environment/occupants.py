@@ -74,6 +74,16 @@ def move_civilians(env: 'BuildingFireEnvironment') -> None:
         if not person.seen:
             continue
         
+        #Check tenability - people below threshold cannot self-evacuate =====
+        # This models physiological incapacitation from smoke inhalation, heat stress, etc.
+        # Children and limited mobility people have HIGHER thresholds (become incapacitated earlier):
+        #   - Child threshold: 60 HP (more vulnerable respiratory/cardiovascular systems)
+        #   - Limited threshold: 50 HP (pre-existing health conditions)
+        #   - Adult threshold: 40 HP (baseline healthy adult)
+        # Below threshold, person needs assistance from responder to evacuate
+        if not person.is_tenable:
+            continue  # Person is incapacitated, cannot move without assistance
+
         # Update panic state - people are panicked if they see hazards but aren't assisted
         current_node = env.nodes[person.node_id]
         if (current_node.on_fire or current_node.smoky) and not person.being_assisted:
@@ -172,19 +182,34 @@ def _edge_cost_for_person(env: 'BuildingFireEnvironment', person: Person,
     
     UNITS: Returns cost in timesteps (1 timestep = ~5 seconds).
     
-    Formula: c_e(t) = [length/v_effective * (1 + θ·density)] / 5.0 + hazard_penalty_timesteps
+    FORMULA: 
+        base_time = length / v_effective (seconds)
+        congestion_factor = 1 + θ·density
+        base_cost = (base_time * congestion_factor) / 5.0  (convert to timesteps)
+        final_cost = base_cost * hazard_multiplier
     
-    Hazard penalties are applied as multiplicative factors, then converted to time cost:
-    - Fire hazard increases cost by 50%
-    - Smoke hazard increases cost by 10%
+    ===== NEW: Hazard penalties scale with continuous fire intensity and smoke density =====
+    Instead of binary hazard flags (0 or 1), we now use:
+    - Fire intensity: 0.0 (no fire) to 1.0 (fully involved)
+    - Smoke density: 0.0 (clear) to 1.0 (dense smoke)
+    
+    Hazard multiplier calculation:
+    - Fire: increases cost by up to 50% at full intensity (1.0 + 0.5 * intensity)
+    - Smoke: increases cost by up to 10% at full density (1.0 + 0.1 * density)
+    
+    This provides:
+    1. More realistic representation of hazard severity
+    2. Better gradient information for path planning
+    3. Allows people to make nuanced decisions (weak smoke vs. heavy smoke)
     """
     # Get effective speed (accounts for assistance and panic)
-    effective_speed = person.effective_speed
+    # Use v_class as fallback if effective_speed property doesn't exist
+    effective_speed = getattr(person, 'effective_speed', person.v_class)
     
     # Base traversal time in seconds
     base_time_seconds = edge_meta.length / max(effective_speed, 1e-6)
     
-    # Congestion factor
+    # Congestion factor (more people = slower movement)
     density = _edge_density(env, u, v)
     theta = env.config['theta_density']
     congestion_factor = 1.0 + theta * density
@@ -192,19 +217,42 @@ def _edge_cost_for_person(env: 'BuildingFireEnvironment', person: Person,
     # Apply congestion and convert to timesteps (1 timestep = 5 seconds)
     base_time_timesteps = (base_time_seconds * congestion_factor) / 5.0
     
-    # Hazard penalties as multiplicative factors
-    hazard_multiplier = 1.0
+    # ===== NEW: Hazard penalties scale with continuous intensity =====
     u_node = env.nodes[u]
     v_node = env.nodes[v]
     
-    if u_node.on_fire or v_node.on_fire:
-        hazard_multiplier = 1.5  # 50% increase for fire hazard
-    elif u_node.smoky or v_node.smoky:
-        hazard_multiplier = 1.1  # 10% increase for smoke hazard
+    # Get maximum fire intensity and smoke density along the edge
+    # Use getattr with fallback to handle nodes without intensity fields
+    # (backward compatibility for older code or nodes that haven't been updated)
+    max_fire = max(
+        getattr(u_node, "fire_intensity", 1.0 if u_node.on_fire else 0.0),
+        getattr(v_node, "fire_intensity", 1.0 if v_node.on_fire else 0.0)
+    )
+    max_smoke = max(
+        getattr(u_node, "smoke_density", 1.0 if u_node.smoky else 0.0),
+        getattr(v_node, "smoke_density", 1.0 if v_node.smoky else 0.0)
+    )
+    
+    # Calculate hazard multiplier based on intensity
+    # Fire and smoke are mutually exclusive (fire dominates)
+    hazard_multiplier = 1.0
+    if max_fire > 0.0:
+        # Fire increases cost by up to 50% at full intensity
+        # Examples:
+        #   - fire_intensity=0.2 → 1.0 + 0.5*0.2 = 1.1 (10% slower)
+        #   - fire_intensity=0.5 → 1.0 + 0.5*0.5 = 1.25 (25% slower)
+        #   - fire_intensity=1.0 → 1.0 + 0.5*1.0 = 1.5 (50% slower)
+        hazard_multiplier *= (1.0 + 0.5 * max_fire)
+    elif max_smoke > 0.0:
+        # Smoke increases cost by up to 10% at full density
+        # Examples:
+        #   - smoke_density=0.3 → 1.0 + 0.1*0.3 = 1.03 (3% slower)
+        #   - smoke_density=1.0 → 1.0 + 0.1*1.0 = 1.1 (10% slower)
+        hazard_multiplier *= (1.0 + 0.1 * max_smoke)
+    # =================================================================
     
     # Return total cost in timesteps
     return base_time_timesteps * hazard_multiplier
-
 
 def _edge_density(env: 'BuildingFireEnvironment', u: str, v: str) -> float:
     """Compute edge density (people per meter)."""
