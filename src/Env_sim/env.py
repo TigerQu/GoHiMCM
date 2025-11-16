@@ -1,152 +1,19 @@
-from dataclasses import dataclass, field
+from .occupants import move_civilians as _move_civilians
+from .occupants import _shortest_distance_to_any_exit as _shortest_dist_exit
+
 from typing import Dict, List, Tuple, Optional
-import random
+import math, random, heapq
 import numpy as np
 import networkx as nx
 import torch
 from torch_geometric.data import Data
 
-# Node type encoding for one-hot vectors 
-NODE_TYPES = {
-    "room": 0,    # Regular rooms where people may be located
-    "hall": 1,    # Hallways connecting rooms
-    "exit": 2     # Exit points of the building
-}
 
-# Feature dimension: F = 10 as described in the specification
-FEATURE_DIM = 10
-
-# Default configuration values
-DEFAULT_CONFIG = {
-    # Hazard spreading parameters
-    "fire_spread_prob": 0.3,        # Probability fire spreads to adjacent node
-    "fire_spread_delay": 2,          # Time steps between spread attempts
-    
-    # Health degradation parameters
-    "hp_loss_fire": 5.0,             # HP lost per step in fire
-    "hp_loss_smoke": 2.0,            # HP lost per step in smoke
-    
-    # Agent parameters
-    "agent_speed": 1.0,              # Nodes per time step (simplified)
-    "search_time": 1,                # Time steps to search a node
-    
-    # People parameters (for future evacuation modeling)
-    "child_speed": 0.9,              # m/s
-    "adult_speed": 1.2,              # m/s
-    "limited_speed": 0.7,            # m/s (elderly/disabled)
-}
-
-
-# DATA CLASSES
-
-@dataclass
-class Person:
-    """
-    Represents an occupant in the building.
-    
-    Attributes:
-        pid: Unique person ID
-        age: Age in years
-        mobility: Mobility category ('child', 'adult', 'limited')
-        hp: Health points (0-100), decreases in hazardous conditions
-        seen: Whether an agent has discovered this person
-        rescued: Whether person has been evacuated
-        node_id: Current location (node ID in graph)
-    """
-    pid: int
-    age: int
-    mobility: str  # 'child' | 'adult' | 'limited'
-    hp: float = 100.0
-    seen: bool = False
-    rescued: bool = False
-    node_id: Optional[str] = None
-    awareness_timer: int = 0
-    on_edge: bool = False
-    edge_u: Optional[str] = None
-    edge_v: Optional[str] = None
-    edge_eta: float = 0.0
-    v_class: float = 1.2
-    evac_distance: Optional[float] = None  # shortest path length to any exit at discovery
-
-    
-    @property
-    def is_alive(self) -> bool:
-        """Person is alive if HP > 0"""
-        return self.hp > 0.0
-
-
-@dataclass
-class NodeMeta:
-    """
-    Metadata for each node in the building graph.
-    
-    Contains both ground-truth state (actual fire/smoke/people) and 
-    observed state (what agents can see through sensors or direct observation).
-    """
-    nid: str                          # Node ID (unique identifier)
-    ntype: str                        # Node type: 'room', 'hall', or 'exit'
-    
-    # Physical properties
-    area: float = 10.0                # Square meters
-    length: float = 5.0               # Characteristic length for traversal time
-    floor: int = 0                    # Floor number (for multi-story buildings)
- 
-    # Ground truth hazard state (actual conditions)
-    on_fire: bool = False             # True if node is currently burning
-    smoky: bool = False               # True if node has smoke
-    
-    # Ground truth occupancy (actual people present)
-    people: List[int] = field(default_factory=list)  # List of person IDs
-    
-    # Agent presence
-    agent_here: bool = False          # True if any agent is at this node
-    swept: bool = False               # True if node has been searched by agent
-    
-    # Observable state (what the policy can see)
-    obs_people_count: int = 0         # Observed number of people (0-3 range)
-    obs_avg_hp: float = 0.0           # Observed average HP (0-1 normalized)
-    
-    # Precomputed features
-    dist_to_fire_norm: float = 1.0    # Normalized distance to nearest fire
-
-
-@dataclass
-class EdgeMeta:
-    """
-    Metadata for edges (connections between nodes).
-    
-    Represents doors, passages, or other connections between spaces.
-    """
-    u: str                            # Source node ID
-    v: str                            # Target node ID
-    
-    # Physical properties
-    width: float = 1.0                # Width in meters (affects flow capacity)
-    length: float = 1.0               # Length in meters (affects traversal time)
-    slope: float = 0.0                # Slope in degrees (for stairs)
-    
-    # Door properties
-    door: bool = True                 # True if this is a doorway
-    fire_door: bool = False           # True if fire-rated door (slows fire spread)
-
-
-@dataclass
-class Agent:
-    """
-    Represents a firefighter agent sweeping the building.
-    
-    Attributes:
-        agent_id: Unique agent ID
-        node_id: Current location (node ID)
-        path: Planned path (list of node IDs to visit)
-        searching: True if currently searching a node
-        search_timer: Steps remaining for current search
-    """
-    agent_id: int
-    node_id: str
-    path: List[str] = field(default_factory=list)
-    searching: bool = False
-    search_timer: int = 0
+from .config import DEFAULT_CONFIG, FEATURE_DIM, NODE_TYPES
+from .entities import Person, NodeMeta, EdgeMeta, Agent
+from .hazards import ignite_node as _ignite_node
+from .hazards import spread_hazards as _spread_hazards
+from .hazards import degrade_health as _degrade_health
 
 
 #main environment class
@@ -174,6 +41,12 @@ class BuildingFireEnvironment:
         """
         # Configuration
         self.config = {**DEFAULT_CONFIG, **(config or {})}
+        self.config.setdefault("sweep_node_types", {"room"})    # only rooms must be searched
+        self.config.setdefault("auto_sweep_types", {"hall", "exit"})  # halls/exits auto-sweep
+        self.config.setdefault("auto_sweep_on_visit", True)     # stepping onto them marks swept
+        self.config.setdefault("required_sweeps", 2)            # each room must be swept twice
+        self.config.setdefault("enable_agent_comm", True)       # agents share searched node info
+        self.config.setdefault("comm_delay", 0)                 # communication delay in time steps
         
         # Building topology
         self.G = nx.Graph()                    # NetworkX graph for topology
@@ -182,6 +55,9 @@ class BuildingFireEnvironment:
         # Entities
         self.people: Dict[int, Person] = {}    # People by ID
         self.agents: Dict[int, Agent] = {}     # Agents by ID
+        
+        # Communication system
+        self.pending_messages: List[Dict] = []  # Messages with delivery_time
         
         # Simulation state
         self.time_step = 0                     # Current simulation time
@@ -195,26 +71,24 @@ class BuildingFireEnvironment:
             "total_search_time": 0,
         }
 
-    def _shortest_distance_to_any_exit(self, start_node: str) -> Optional[float]:
-        exits = [nid for nid, meta in self.nodes.items() if meta.ntype == 'exit']
-        if not exits:
-            return None
-
-        # Weight = physical length (fallback to 1.0 if meta missing)
-        def w(u, v, edata):
-            meta = edata.get("meta", None)
-            return getattr(meta, "length", 1.0) if meta is not None else 1.0
-        best = None
-        for ex in exits:
-            try:
-                dist = nx.dijkstra_path_length(self.G, start_node, ex, weight=w)
-                if best is None or dist < best:
-                    best = dist
-            except nx.NetworkXNoPath:
-                continue
-        return best
-      
-
+        # Reward tracking
+        self._last_people_found = 0
+        self._last_nodes_swept = 0
+        self._last_people_alive = 0
+        self._last_people_rescued = 0
+        
+        # For reset
+        self._initial_agent_positions: Dict[int, str] = {}
+        self._initial_people_state: List[Tuple[str, int, str, float]] = []
+        
+        # Edge load tracking (for congestion)
+        self._edge_load: Dict[Tuple[str, str], int] = {}
+        
+        # RNG for determinism
+        self._rng = random.Random()
+        self._np_rng = np.random.RandomState()
+        
+        
     # construct building
     
     def add_node(self, nid: str, ntype: str, **kwargs) -> None:
@@ -251,25 +125,34 @@ class BuildingFireEnvironment:
     
     
     def spawn_person(self, node_id: str, age: int, mobility: str, hp: float = 100.0) -> int:
-        """
-        Add a person to the building at the specified location.
-        
-        Args:
-            node_id: Node where person starts
-            age: Age in years
-            mobility: Mobility category ('child', 'adult', 'limited')
-            hp: Initial health points (default 100)
-        
-        Returns:
-            Person ID (integer)
-        """
+        """Spawn person at location."""
         if node_id not in self.nodes:
             raise ValueError(f"Node {node_id} does not exist")
         
         pid = len(self.people)
-        person = Person(pid=pid, age=age, mobility=mobility, hp=hp, node_id=node_id)
+        speed_map = {
+            'adult': self.config['adult_speed'],
+            'child': self.config['child_speed'],
+            'limited': self.config['limited_speed']
+        }
+        v_class = speed_map.get(mobility, self.config['adult_speed'])
+        
+        # Sample awareness delay
+        delay = max(0, int(self._np_rng.normal(
+            self.config['awareness_delay_mean'],
+            self.config['awareness_delay_std']
+        )))
+        
+        person = Person(
+            pid=pid, age=age, mobility=mobility, hp=hp,
+            node_id=node_id, v_class=v_class, awareness_timer=delay
+        )
         self.people[pid] = person
         self.nodes[node_id].people.append(pid)
+        
+        # Store for reset
+        self._initial_people_state.append((node_id, age, mobility, hp))
+        
         return pid
     
     
@@ -286,95 +169,228 @@ class BuildingFireEnvironment:
         
         agent = Agent(agent_id=agent_id, node_id=node_id)
         self.agents[agent_id] = agent
-        
+        self._initial_agent_positions[agent_id] = node_id     
         # Update node states
         self._update_agent_positions()
-    
 
-    # fire and smoke set up
-    
-    def ignite_node(self, node_id: str) -> None:
+    def seed(self, seed: Optional[int] = None) -> None:
+        """Set random seed for deterministic behavior."""
+        if seed is not None:
+            self._rng = random.Random(seed)
+            self._np_rng = np.random.RandomState(seed)
+            random.seed(seed)
+            np.random.seed(seed)
+
+    #all of the functions
+    def reset(self, fire_node: Optional[str] = None, seed: Optional[int] = None) -> Data:
         """
-        Start a fire at the specified node.
+        Reset environment for a new episode (PPO requirement).
         
         Args:
-            node_id: Node to ignite
-        """
-        if node_id not in self.nodes:
-            raise ValueError(f"Node {node_id} does not exist")
+            fire_node: Node to ignite (None = random room, "none" = no fire)
         
-        self.nodes[node_id].on_fire = True
-        self.nodes[node_id].smoky = True  # Fire implies smoke
-        print(f"[T={self.time_step}] Fire ignited at {node_id}")
-    
-    
-    def spread_hazards(self) -> None:
+        Returns:
+            Initial observation (PyG Data object)
         """
-        Spread fire and smoke to adjacent nodes.
-        
-        Logic:
-        1. Fire spreads probabilistically to neighbors (slower through fire doors)
-        2. Smoke spreads more easily than fire
-        3. Fire always produces smoke
-        """
-        # Only spread fire periodically (not every step)
-        self.fire_spread_counter += 1
-        if self.fire_spread_counter < self.config["fire_spread_delay"]:
-            return
+        if seed is not None:
+            self.seed(seed)
+
+        # Reset time
+        self.time_step = 0
         self.fire_spread_counter = 0
+        self.pending_messages = []
         
-        # Identify currently burning nodes
-        burning_nodes = [n for n in self.nodes.values() if n.on_fire]
+        # Reset statistics
+        self.stats = {
+            "people_rescued": 0,
+            "people_found": 0,
+            "nodes_swept": 0,
+            "total_search_time": 0,
+        }
         
-        # Spread from each burning node
-        for burning_node in burning_nodes:
-            for neighbor_id in self.G.neighbors(burning_node.nid):
-                neighbor = self.nodes[neighbor_id]
-                edge_data = self.G.edges[burning_node.nid, neighbor_id]
-                edge_meta: EdgeMeta = edge_data["meta"]
-                
-                # Fire doors reduce spread probability
-                spread_prob = self.config["fire_spread_prob"]
-                if edge_meta.fire_door:
-                    spread_prob *= 0.3  # Fire doors are 70% more effective
-                # Attempt to spread fire
-                if not neighbor.on_fire and random.random() < spread_prob:
-                    neighbor.on_fire = True
-                    print(f"[T={self.time_step}] Fire spread to {neighbor_id}")
-                
-                # Smoke spreads more easily (always to adjacent nodes of fire)
-                neighbor.smoky = True
+        # Reset reward tracking
+        self._last_people_found = 0
+        self._last_nodes_swept = 0
+        self._last_people_alive = len(self.people)
+        self._last_people_rescued = 0
+
+        # Reset edge load
+        self._edge_load.clear()
+        
+        # Reset all nodes
+        for node in self.nodes.values():
+            node.on_fire = False
+            node.smoky = False
+            node.sweep_count = 0
+            node.agent_here = False
+            node.obs_people_count = 0
+            node.obs_avg_hp = 0.0
+            node.people = []  # Clear people lists
+        
+        # Reset all people to initial state
+        for pid, (node_id, age, mobility, hp) in enumerate(self._initial_people_state):
+            person = self.people[pid]
+            person.hp = hp
+            person.seen = False
+            person.rescued = False
+            person.node_id = node_id
+
+            # Re-sample awareness delay
+            delay = max(0, int(self._np_rng.normal(
+                self.config['awareness_delay_mean'],
+                self.config['awareness_delay_std']
+            )))
+            
+            person.awareness_timer = delay
+            person.on_edge = False
+            person.edge_u = None
+            person.edge_v = None
+            person.edge_eta = 0.0
+            person.evac_distance = None
+            
+            # Re-add to node's people list
+            self.nodes[node_id].people.append(pid)
+        
+        # Reset agents to initial positions
+        for agent_id, start_pos in self._initial_agent_positions.items():
+            if agent_id in self.agents:
+                self.agents[agent_id].node_id = start_pos
+                self.agents[agent_id].searching = False
+                self.agents[agent_id].search_timer = 0
+        
+        self._update_agent_positions()
+        
+        # Start fire
+        if fire_node is None:
+            # Random room
+            rooms = [n.nid for n in self.nodes.values() if n.ntype == "room"]
+            if rooms:
+                _ignite_node(self.nodes, random.choice(rooms))
+        elif fire_node != "none":
+            _ignite_node(self.nodes, fire_node)
+        
+        # Get initial observation
+        observation = self.get_observation()
+        return observation
     
     
-    def degrade_health(self) -> None:
+    def get_observation(self) -> Data:
         """
-        Reduce HP of people in hazardous conditions.
+        Get current observation (PPO requirement).
         
-        Logic:
-        - People in fire lose HP faster than people in smoke
-        - HP cannot go below 0
-        - Dead people (HP=0) are tracked but no longer degrade
+        Returns:
+            PyG Data object with current graph state
         """
-        for person in self.people.values():
-            if not person.is_alive:
-                continue  # Skip dead people
+        observation, _ = self.to_pytorch_geometric()
+        return observation
+    
+    
+    def get_state(self) -> Dict:
+        """
+        Get full environment state (PPO requirement).
+        
+        Returns:
+            Dictionary with complete environment state
+        """
+        _, env_state = self.to_pytorch_geometric()
+        return env_state
+    
+    
+    def get_valid_actions(self, agent_id: int) -> List[str]:
+        """Get valid actions for agent (action masking)."""
+        if agent_id not in self.agents:
+            return ["wait"]
+        
+        agent = self.agents[agent_id]
+        if agent.searching:
+            return ["wait"]
+        
+        valid_actions = ["search"]
+        current = agent.node_id
+        for neighbor in self.G.neighbors(current):
+            valid_actions.append(f"move_{neighbor}")
+        valid_actions.append("wait")
+        
+        return valid_actions
+    
+    def get_agent_node_index(self, agent_id: int) -> Optional[int]:
+        """Get node index where agent is located."""
+        if agent_id not in self.agents:
+            return None
+        agent = self.agents[agent_id]
+        node_ids = list(self.nodes.keys())
+        try:
+            return node_ids.index(agent.node_id)
+        except ValueError:
+            return None
+    
+    def do_action(self, actions: Dict[int, str]):
+        """
+        Execute actions and return (observation, reward, done, info) (PPO requirement).
+
+        NOTE: reward kept at 0.0 here (no-reward test), matching your smoke test.
+        """
+        # Parse and execute agent actions
+        for agent_id, action_str in actions.items():
+            if agent_id not in self.agents:
+                continue
             
-            node = self.nodes[person.node_id]
-            
-            # Calculate HP loss based on hazards
-            hp_loss = 0.0
-            if node.on_fire:
-                hp_loss = self.config["hp_loss_fire"]
-            elif node.smoky:
-                hp_loss = self.config["hp_loss_smoke"]
-            
-            # Apply damage
-            if hp_loss > 0:
-                person.hp = max(0.0, person.hp - hp_loss)
-                if not person.is_alive:
-                    print(f"[T={self.time_step}] Person {person.pid} died at {person.node_id}")
+            if action_str.startswith("move_"):
+                target = action_str[5:]  # Remove "move_" prefix
+                self.move_agent(agent_id, target)
+            elif action_str == "search":
+                self.start_search(agent_id)
+            # "wait" does nothing
+        
+        # Advance environment by one step
+        self.step()
+        
+        # reward placeholder
+        reward = 0.0
+        
+        # Check if episode is done
+        done = self._is_done()
+        
+        # Get next observation
+        observation = self.get_observation()
+        
+        # Collect info
+        info = {
+            "stats": self.get_statistics(),
+            "is_success": self.is_sweep_complete(),
+            "time_step": self.time_step,
+        }
+        
+        return observation, reward, done, info
+    
+    
+    
+    def _is_done(self) -> bool:
+        """
+        Check if episode should terminate.
+        
+        Termination conditions:
+        1. All rooms swept (success)
+        2. Max steps reached (timeout)
+        3. All people dead (optional early termination)
+        """
+        # Success: all rooms swept
+        if self.is_sweep_complete():
+            return True
+        
+        # Timeout
+        if self.time_step >= self.config["max_steps"]:
+            return True
+        
+        # All people dead (optional)
+        if self.people and all(not p.is_alive for p in self.people.values()):
+            return True
+        
+        return False
     
 
+    # fire and smoke occur via hazards.py (ignite_node, spread_hazards, degrade_health)
+    
     # Agent Actions
     
     def move_agent(self, agent_id: int, target_node_id: str) -> bool:
@@ -396,7 +412,6 @@ class BuildingFireEnvironment:
         
         # Check if target is adjacent
         if target_node_id not in self.G.neighbors(current_node):
-            print(f"[Warning] Agent {agent_id} cannot move from {current_node} to {target_node_id} (not adjacent)")
             return False
         
         # Move agent
@@ -405,6 +420,7 @@ class BuildingFireEnvironment:
         agent.search_timer = 0
         
         self._update_agent_positions()
+        self._maybe_auto_sweep_current_node(self.nodes[target_node_id])
         return True
     
     
@@ -430,7 +446,6 @@ class BuildingFireEnvironment:
         # Start search
         agent.searching = True
         agent.search_timer = self.config["search_time"]
-        print(f"[T={self.time_step}] Agent {agent_id} started searching {agent.node_id}")
         return True
     
     
@@ -441,10 +456,14 @@ class BuildingFireEnvironment:
         Logic:
         - Decrement search timers
         - When timer reaches 0:
-          1. Mark node as swept
-          2. Reveal all people in node
-          3. Update statistics
+          1. Increment sweep_count for the node
+          2. Add to agent's searched_nodes
+          3. Broadcast to other agents (if comm enabled)
+          4. Reveal all people in node
+          5. Update statistics
         """
+        required = self.config.get("required_sweeps", 2)
+        
         for agent in self.agents.values():
             if not agent.searching:
                continue
@@ -456,30 +475,37 @@ class BuildingFireEnvironment:
                agent.searching = False
                node = self.nodes[agent.node_id]
                
-               if not node.swept:
-                node.swept = True
-                self.stats["nodes_swept"] += 1
+               if node.ntype in self.config.get("sweep_node_types", {"room"}):
+                # Check if this specific agent has already searched this node
+                if node.nid not in agent.searched_nodes:
+                    # This agent hasn't searched here before, so it counts
+                    if node.sweep_count < required:
+                        node.sweep_count += 1
+                        self.stats["nodes_swept"] += 1
+                    
+                    # Record that this agent searched this node
+                    agent.searched_nodes.add(node.nid)
+                    
+                    # Broadcast to other agents if communication enabled
+                    if self.config.get("enable_agent_comm", True):
+                        self._broadcast_search_completion(agent.agent_id, node.nid)
 
-            # --- DISCOVERY LOGIC + EVAC DISTANCE ---
-            for pid in node.people:
-                person = self.people[pid]
+               # --- DISCOVERY LOGIC + EVAC DISTANCE ---
+               for pid in node.people:
+                    person = self.people[pid]
 
-                first_time_seen = not person.seen
-                if first_time_seen:
-                    person.seen = True
-                    self.stats["people_found"] += 1
+                    first_time_seen = not person.seen
+                    if first_time_seen:
+                        person.seen = True
+                        self.stats["people_found"] += 1
 
-                    # Compute shortest distance to any exit at discovery time
-                    person.evac_distance = self._shortest_distance_to_any_exit(person.node_id)
+                        # Compute shortest distance to any exit at discovery time
+                        person.evac_distance = _shortest_dist_exit(self, person.node_id)
 
-                    # If still alive at discovery, count as evacuated success immediately
-                    if person.is_alive and not person.rescued:
-                        person.rescued = True
-                        self.stats["people_rescued"] += 1
-
-            if getattr(self, "debug", False):
-                print(f"[T={self.time_step}] Agent {agent.agent_id} completed search of {agent.node_id}")
-
+                        # If still alive at discovery, count as evacuated success immediately
+                        if person.is_alive and not person.rescued:
+                            person.rescued = True
+                            self.stats["people_rescued"] += 1
 
     
     # Oberservation and feature extraction
@@ -555,8 +581,7 @@ class BuildingFireEnvironment:
         for node in self.nodes.values():
             raw_dist = distances.get(node.nid, 10.0)  # Default 10m if unreachable
             node.dist_to_fire_norm = min(raw_dist / 10.0, 1.0)  # Normalize and cap
-    
-    
+
     def get_node_features(self, node: NodeMeta) -> np.ndarray:
         """
         Construct the 10-dimensional feature vector for a node.
@@ -570,13 +595,8 @@ class BuildingFireEnvironment:
         [7]     Average HP normalized (divided by 100)
         [8]     Agent presence indicator (0 or 1)
         [9]     Distance to fire normalized (divided by 10, capped at 1)
-        
-        Args:
-            node: NodeMeta object
-        
-        Returns:
-            Numpy array of shape (10,)
         """
+        import numpy as np  # local import to avoid circulars in some IDEs
         # Features 1-3: One-hot encoding of node type
         one_hot = np.zeros(3, dtype=np.float32)
         one_hot[NODE_TYPES[node.ntype]] = 1.0
@@ -630,6 +650,7 @@ class BuildingFireEnvironment:
                 - nid: List of node IDs (for debugging)
             env_state: Dictionary with ground truth state (for evaluation)
         """
+        import numpy as np
         # Update observations before creating features
         self._update_observations()
         self._compute_fire_distances()
@@ -719,25 +740,111 @@ class BuildingFireEnvironment:
         self.process_searches()
         
         # Spread hazards
-        self.spread_hazards()
+        self.fire_spread_counter = _spread_hazards(
+            self.G, self.nodes,
+            self.config["fire_spread_prob"],
+            self.fire_spread_counter,
+            self.config["fire_spread_delay"]
+        )
+        # Move civilians
+        _move_civilians(self)
+
         
         # Health degradation
-        self.degrade_health()
-        
+        _degrade_health(
+            self.nodes, self.people,
+            self.config["hp_loss_fire"], self.config["hp_loss_smoke"],
+            self.time_step, verbose=False
+        )
+
         # Advance time
         self.time_step += 1
+        
+        # Deliver messages that have reached their delivery time
+        self._deliver_pending_messages()
     
     
     def is_sweep_complete(self) -> bool:
+        sweep_kinds = self.config.get("sweep_node_types", {"room"})
+        required = self.config.get("required_sweeps", 2)
+        targets = [n for n in self.nodes.values() if n.ntype in sweep_kinds]
+        # If there are zero targets, define completion as False (or True if you prefer)
+        return len(targets) > 0 and all(n.sweep_count >= required for n in targets)
+    
+
+    
+    def _maybe_auto_sweep_current_node(self, agent_node: "NodeMeta") -> None:
+        if not self.config.get("auto_sweep_on_visit", True):
+            return
+        required = self.config.get("required_sweeps", 2)
+        if agent_node.ntype in self.config.get("auto_sweep_types", {"hall", "exit"}):
+            if agent_node.sweep_count < required:
+               agent_node.sweep_count += 1
+               self.stats["nodes_swept"] += 1
+
+    def _broadcast_search_completion(self, sender_id: int, node_id: str) -> None:
         """
-        Check if the building sweep is complete.
+        Broadcast search completion to all other agents with optional delay.
         
-        A sweep is complete when all nodes have been searched (swept).
+        Args:
+            sender_id: Agent who completed the search
+            node_id: Node that was searched
+        """
+        delay = self.config.get("comm_delay", 0)
+        delivery_time = self.time_step + delay
         
+        message = {
+            "type": "search_complete",
+            "sender": sender_id,
+            "node_id": node_id,
+            "timestamp": self.time_step,
+            "delivery_time": delivery_time
+        }
+        
+        # Add to pending messages queue
+        for agent_id in self.agents.keys():
+            if agent_id != sender_id:
+                self.pending_messages.append({
+                    **message,
+                    "recipient": agent_id
+                })
+
+    def _deliver_pending_messages(self) -> None:
+        """
+        Deliver messages that have reached their delivery time.
+        """
+        # Find messages ready for delivery
+        ready_messages = [msg for msg in self.pending_messages 
+                         if msg["delivery_time"] <= self.time_step]
+        
+        # Deliver them
+        for msg in ready_messages:
+            recipient_id = msg["recipient"]
+            if recipient_id in self.agents:
+                agent = self.agents[recipient_id]
+                agent.message_buffer.append(msg)
+                agent.known_swept_nodes.add(msg["node_id"])
+        
+        # Remove delivered messages
+        self.pending_messages = [msg for msg in self.pending_messages 
+                                if msg["delivery_time"] > self.time_step]
+
+    def get_agent_known_sweeps(self, agent_id: int) -> set:
+        """
+        Get all nodes known to be swept by this agent (personal + communicated).
+        
+        Args:
+            agent_id: Agent ID
+            
         Returns:
-            True if all nodes are swept, False otherwise
+            Set of node IDs known to be swept
         """
-        return all(node.swept for node in self.nodes.values())
+        if agent_id not in self.agents:
+            return set()
+        agent = self.agents[agent_id]
+        return agent.searched_nodes | agent.known_swept_nodes
+
+
     
     
     def get_statistics(self) -> Dict:
@@ -783,7 +890,7 @@ class BuildingFireEnvironment:
             if node.smoky: hazards.append("SMOKE")
             hazard_str = ", ".join(hazards) if hazards else "clear"
             
-            swept_str = "SWEPT" if node.swept else "unswept"
+            swept_str = f"swept\u00d7{node.sweep_count}" if node.sweep_count > 0 else "unswept"
             people_str = f"{len(node.people)} people" if node.people else "empty"
             
             print(f"  {node.nid:6s} [{node.ntype:4s}]: {hazard_str:12s} | {swept_str:8s} | {people_str}")
@@ -793,139 +900,3 @@ class BuildingFireEnvironment:
         for key, value in self.get_statistics().items():
             print(f"  {key}: {value}")
         print()
-
-
-# Build the layout
-
-
-def build_standard_office_layout() -> BuildingFireEnvironment:
-    """
-    Build the standard one-floor office layout as specified:
-    - Central hallway divided into 3 segments (for granularity)
-    - 3 rooms on top side of hallway
-    - 3 rooms on bottom side of hallway
-    - 2 exits (left and right ends of hallway)
-    
-    Returns:
-        Initialized BuildingFireEnvironment
-    """
-    env = BuildingFireEnvironment()
-    
-    # Central Hallway (3 segments)
-  
-    for i in range(3):
-        env.add_node(
-            nid=f"H{i}",
-            ntype="hall",
-            length=6.0,        # 6 meters per segment
-            area=12.0,         # 2m wide × 6m long
-            floor=0
-        )
-    
-    # Connect hallway segments
-    env.add_edge("H0", "H1", length=6.0, width=2.0, door=False)  # Open hallway
-    env.add_edge("H1", "H2", length=6.0, width=2.0, door=False)
-    
-    # ROOMS - TOP ROW (3 rooms along top of hallway)
-
-    for i in range(3):
-        env.add_node(
-            nid=f"RT{i}",
-            ntype="room",
-            length=4.0,        # 4m × 4m room
-            area=16.0,
-            floor=0,
-        )
-
-        # Connect to corresponding hallway segment
-
-        env.add_edge(
-            f"RT{i}", f"H{i}",
-            length=1.0,        # 1m doorway depth
-            width=0.9,         # Standard door width
-            door=True
-        )
-    
-
-    #  3 rooms along bottom of hallway
-
-    for i in range(3):
-        env.add_node(
-            nid=f"RB{i}",
-            ntype="room",
-            length=4.0,
-            area=16.0,
-            floor=0,   
-        )
-        # Connect to corresponding hallway segment
-        env.add_edge(
-            f"RB{i}", f"H{i}",
-            length=1.0,
-            width=0.9,
-            door=True
-        )
-    
-
-    # exists - left and right ends of hallway
-    env.add_node(
-        nid="EXIT_LEFT",
-        ntype="exit",
-        length=2.0,
-        area=4.0,
-        floor=0
-    )
-    env.add_node(
-        nid="EXIT_RIGHT",
-        ntype="exit",
-        length=2.0,
-        area=4.0,
-        floor=0
-    )
-    
-    # Connect exits to hallway ends
-    env.add_edge("EXIT_LEFT", "H0", length=1.0, width=1.2, door=True)
-    env.add_edge("EXIT_RIGHT", "H2", length=1.0, width=1.2, door=True)
-    
-
-    # populated with people (Hidden until agents search)
-    
-    env.spawn_person("RT0", age=34, mobility="adult", hp=95.0)
-    env.spawn_person("RT2", age=55, mobility="limited", hp=90.0)
-    env.spawn_person("RB0", age=28, mobility="adult", hp=100.0)
-    env.spawn_person("RB2", age=6, mobility="child", hp=100.0) 
-    env.spawn_person("RB1", age=32, mobility="adult", hp=100.0)
-    env.spawn_person("RB1", age=41, mobility="adult", hp=97.0)
-    
-
-    # place agents at exits
-
-    env.place_agent(agent_id=0, node_id="EXIT_LEFT")
-    env.place_agent(agent_id=1, node_id="EXIT_RIGHT")
-    
-    return env
-
-
-
-"""
-if __name__ == "__main__":
-    print("Building Fire Evacuation Simulation")
-    print("=" * 60)
-    
-    # Create environment
-    env = build_standard_office_layout()
-    
-    # Start fire in one room
-    env.ignite_node("RT1")
-    
-    # Print initial status
-    env.print_status()
-    
-    # Get PyTorch Geometric representation
-    pyg_data, state = env.to_pytorch_geometric()
-    print("\nPyTorch Geometric Data:")
-    print(f"  Nodes: {pyg_data.x.shape}")
-    print(f"  Edges: {pyg_data.edge_index.shape}")
-    print(f"  Edge features: {pyg_data.edge_attr.shape}")
-    print(f"\nNode features (first 3 nodes):")
-    print(pyg_data.x[:3])
-"""
