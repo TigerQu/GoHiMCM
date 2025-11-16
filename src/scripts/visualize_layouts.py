@@ -180,8 +180,8 @@ def compute_positions_by_floor(env):
             continue
 
         # Handle babycare floor heuristics
-        # Find any corridor nodes like F{f}_C0..C2
-        corridors = { }
+        # New clearer layout: horizontal corridors with rooms on sides, nurse station at center
+        corridors = {}
         for nid, meta in nodes:
             m = baby_corridor_re.match(nid)
             if m and int(m.group('f')) == f:
@@ -189,63 +189,73 @@ def compute_positions_by_floor(env):
                 corridors[i] = nid
 
         if corridors:
-            # order corridor indices
             idxs = sorted(corridors.keys())
             center_x = 0.0
-            # place corridors horizontally - main central axis with generous spacing
-            for pos_i, i in enumerate(idxs):
+            corridor_y = - (f * floor_gap)
+            
+            # Place corridors horizontally (C0, C1, C2)
+            # C0 on left, C1 in center, C2 on right
+            corridor_spacing = hall_x_gap * 10  # wider spacing
+            for i in idxs:
                 nid = corridors[i]
-                x = center_x + (pos_i - len(idxs)/2 + 0.5) * hall_x_gap * 6
-                y = - (f * floor_gap)
-                positions[nid] = (x, y)
+                x = center_x + (i - 1) * corridor_spacing  # C0=-10, C1=0, C2=+10
+                positions[nid] = (x, corridor_y)
 
-            # place nurse station at center top - key focal point
+            # Nurse station at lower side position to avoid overlap
             nurse_id = f"F{f}_NURSE"
             if nurse_id in env.nodes:
-                positions[nurse_id] = (center_x, - (f * floor_gap) + hall_y_gap * 3.5)
+                positions[nurse_id] = (center_x + corridor_spacing * 1.2, corridor_y - hall_y_gap * 1.5)
 
-            # place nurseries in a row above corridors, aligned and well-spaced
-            for nid, meta in nodes:
-                m = baby_nur_re.match(nid)
-                if m and int(m.group('f')) == f:
-                    r = int(m.group('r'))
-                    cor = corridors.get(r)
-                    if cor and cor in positions:
-                        cx, cy = positions[cor]
-                        # align nurseries above their corresponding corridors
-                        positions[nid] = (cx, cy + hall_y_gap * 2.0)
+            # Place nurseries: 2 nurseries per corridor, very close together
+            # NUR0, NUR1 above C0; NUR2, NUR3 above C1; NUR4, NUR5 above C2
+            for r in range(6):
+                nur_id = f"F{f}_NUR{r}"
+                if nur_id in env.nodes:
+                    corridor_idx = r // 2  # 0-1 -> C0, 2-3 -> C1, 4-5 -> C2
+                    side_offset = (r % 2 - 0.5) * hall_x_gap * 1.5  # tighter spacing
+                    cor_x = center_x + (corridor_idx - 1) * corridor_spacing
+                    positions[nur_id] = (cor_x + side_offset, corridor_y + hall_y_gap * 2.2)
 
-            # play area: place to the far right
-            play = f"F{f}_PLAY"
-            kit = f"F{f}_KITCHEN"
-            if play in env.nodes:
-                last_c = corridors.get(idxs[-1])
-                if last_c and last_c in positions:
-                    cx, cy = positions[last_c]
-                    positions[play] = (cx + hall_x_gap * 5, cy)
+            # Kitchen at far left, aligned with corridor level
+            kit_id = f"F{f}_KITCHEN"
+            if kit_id in env.nodes:
+                x = center_x - 1 * corridor_spacing - hall_x_gap * 5
+                positions[kit_id] = (x, corridor_y)
+
+            # Play areas: PLAY0 at far right, PLAY1 at left
+            play0_id = f"F{f}_PLAY0"
+            if play0_id in env.nodes:
+                x = center_x + 1 * corridor_spacing + hall_x_gap * 5
+                positions[play0_id] = (x, corridor_y)
             
-            # kitchen: place to the far left
-            if kit in env.nodes:
-                first_c = corridors.get(idxs[0])
-                if first_c and first_c in positions:
-                    cx, cy = positions[first_c]
-                    positions[kit] = (cx - hall_x_gap * 5, cy)
+            play1_id = f"F{f}_PLAY1"
+            if play1_id in env.nodes:
+                x = center_x - 1 * corridor_spacing - hall_x_gap * 9
+                positions[play1_id] = (x, corridor_y + hall_y_gap * 2)
 
-            # nurse connector halls: place strategically between rooms and nurse station
-            for nid, meta in nodes:
-                if nid.startswith(f"F{f}_NCON_"):
-                    target = None
-                    if "NUR" in nid and "_NUR" in nid:
-                        target = nid.replace("NCON_", "")
-                    elif "PLAY" in nid:
-                        target = f"F{f}_PLAY"
-                    elif "KIT" in nid:
-                        target = f"F{f}_KITCHEN"
-                    if target and target in positions and nurse_id in positions:
-                        tx, ty = positions[target]
-                        nxp, nyp = positions[nurse_id]
-                        # place connector closer to the room (2/3 of the way from nurse to room)
-                        positions[nid] = ((tx * 2 + nxp) / 3.0, (ty * 2 + nyp) / 3.0)
+            # Storage room at far right upper area
+            storage_id = f"F{f}_STORAGE"
+            if storage_id in env.nodes:
+                x = center_x + 1 * corridor_spacing + hall_x_gap * 9
+                positions[storage_id] = (x, corridor_y + hall_y_gap * 2)
+            
+            # Place exits for babycare
+            # Ground floor exits
+            if f == 0:
+                if 'EXIT_G_LEFT' in env.nodes:
+                    c0_x, c0_y = positions.get(f'F0_C0', (0, 0))
+                    positions['EXIT_G_LEFT'] = (c0_x - corridor_spacing * 0.8, c0_y)
+                if 'EXIT_G_RIGHT' in env.nodes:
+                    c2_x, c2_y = positions.get(f'F0_C2', (0, 0))
+                    positions['EXIT_G_RIGHT'] = (c2_x + corridor_spacing * 0.8, c2_y)
+            
+            # Roof exit on top floor
+            if f == 2:
+                roof_exit = 'F2_ROOF_EXIT'
+                if roof_exit in env.nodes:
+                    c2_x, c2_y = positions.get(f'F2_C2', (0, 0))
+                    positions[roof_exit] = (c2_x + corridor_spacing * 0.8, c2_y + hall_y_gap * 1.5)
+            
             processed_floors.add(f)
             continue
 
@@ -314,17 +324,43 @@ def draw_env(env, out_path, title=None):
     for nid, meta in env.nodes.items():
         node_type = getattr(meta, 'ntype', 'room')
         node_colors.append(NODE_COLOR_MAP.get(node_type, '#CCCCCC'))
-        # Size by area if available (larger baseline for clarity)
+        # Increased base size for better visibility
         area = getattr(meta, 'area', 10.0)
-        node_sizes.append(max(300, min(2500, area * 20)))
+        node_sizes.append(max(800, min(4000, area * 40)))
         labels[nid] = nid
 
-    # Draw edges
-    nx.draw_networkx_edges(G, pos, alpha=0.5, width=1.3)
+    # Determine if this is a babycare layout
+    is_babycare = any('_NUR' in nid or '_NURSE' in nid for nid in G.nodes())
+    
+    if is_babycare:
+        # Draw edges with curved connections for babycare only
+        # Separate nurse station connections for special styling
+        nurse_edges = []
+        normal_edges = []
+        
+        for u, v in G.edges():
+            if 'NURSE' in u or 'NURSE' in v:
+                nurse_edges.append((u, v))
+            else:
+                normal_edges.append((u, v))
+        
+        # Draw normal edges with curves (using arrows=True for curved edges)
+        nx.draw_networkx_edges(G, pos, edgelist=normal_edges, alpha=0.6, width=2.0, 
+                              edge_color='#999999', arrows=True, arrowstyle='-',
+                              connectionstyle='arc3,rad=0.1', min_source_margin=15, min_target_margin=15)
+        
+        # Draw nurse station edges with more pronounced curves
+        nx.draw_networkx_edges(G, pos, edgelist=nurse_edges, alpha=0.5, width=2.5, 
+                              edge_color='#FF8C00', arrows=True, arrowstyle='-',
+                              connectionstyle='arc3,rad=0.2', min_source_margin=15, min_target_margin=15)
+    else:
+        # Draw straight edges for other layouts, also thicker
+        nx.draw_networkx_edges(G, pos, alpha=0.6, width=2.0, edge_color='#999999')
+    
     # Draw nodes
-    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=node_sizes, edgecolors='#444444', linewidths=1.0)
-    # Optional: draw labels
-    nx.draw_networkx_labels(G, pos, labels, font_size=6)
+    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=node_sizes, edgecolors='#444444', linewidths=1.5)
+    # Optional: draw labels with better font
+    nx.draw_networkx_labels(G, pos, labels, font_size=7, font_weight='bold')
 
     plt.axis('off')
     plt.tight_layout()
