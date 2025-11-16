@@ -13,7 +13,7 @@ class GAT(nn.Module):
         super().__init__()
         # Define the GAT layers of the network
         self.gat1: GATConv = GATConv(
-                in_channels=10,
+                in_channels=11,
                 out_channels=32,
                 heads=CONFIGS['gat']['heads'],
                 dropout=CONFIGS['gat']['dropout'],
