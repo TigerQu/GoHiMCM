@@ -1,4 +1,4 @@
-import single_floor as sf
+import legacy.single_floor as sf
 class MultipleFloorEnv:
     def __init__(self, num_floors, floor_size, num_agents):
         self.floors = [sf.SingleFloorEnv(floor_size, num_agents) for _ in range(num_floors)]
