@@ -16,6 +16,7 @@ NODE_TYPES = {
     "hall": 1,    # Hallways connecting rooms
     "exit": 2,     # Exit points of the building
     "floor": 3,    # Floor nodes for multi-story buildings
+    "nursery": 4,  # Nursery rooms for children
 }
 
 # Feature dimension: F = 10 as described in the specification

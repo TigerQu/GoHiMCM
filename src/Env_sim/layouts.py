@@ -127,7 +127,7 @@ def build_babycare_layout() -> BuildingFireEnvironment:
     """
     env = BuildingFireEnvironment()
 
-    FLOORS = 5
+    FLOORS = 3  # reduced to 3 floors for clearer visualization
     # For each floor create 3 corridor segments (C0, C1, C2), 3 nurseries, 1 nurse room, 1 play area, 1 kitchen
     for f in range(FLOORS):
         # Corridors
@@ -141,23 +141,43 @@ def build_babycare_layout() -> BuildingFireEnvironment:
         # Nurseries (3 per floor)
         for r in range(3):
             nid = f"F{f}_NUR{r}"
-            env.add_node(nid=nid, ntype="nursery", length=5.0, area=20.0, floor=f)
+            env.add_node(nid=nid, ntype="room", length=5.0, area=20.0, floor=f)
             env.add_edge(nid, f"F{f}_C{r}", length=1.0, width=1.0, door=True)
 
         # Nurse room (one per floor, connected to central corridor)
         nurse_nid = f"F{f}_NURSE"
-        env.add_node(nid=nurse_nid, ntype="nurse_room", length=4.0, area=12.0, floor=f)
+        env.add_node(nid=nurse_nid, ntype="room", length=4.0, area=12.0, floor=f)
         env.add_edge(nurse_nid, f"F{f}_C1", length=1.0, width=1.0, door=True)
 
         # Play area
         play_nid = f"F{f}_PLAY"
-        env.add_node(nid=play_nid, ntype="play_area", length=6.0, area=24.0, floor=f)
+        env.add_node(nid=play_nid, ntype="room", length=6.0, area=24.0, floor=f)
         env.add_edge(play_nid, f"F{f}_C2", length=1.0, width=1.2, door=True)
 
         # Kitchen / service
         kit_nid = f"F{f}_KITCHEN"
-        env.add_node(nid=kit_nid, ntype="kitchen", length=4.0, area=10.0, floor=f)
+        env.add_node(nid=kit_nid, ntype="room", length=4.0, area=10.0, floor=f)
         env.add_edge(kit_nid, f"F{f}_C0", length=1.0, width=1.0, door=True)
+
+        # Special nurse-connection hallways: connect every room on this floor to the nurse station
+        # Nurseries
+        for r in range(3):
+            con_nid = f"F{f}_NCON_NUR{r}"
+            env.add_node(nid=con_nid, ntype="hall", length=3.0, area=6.0, floor=f)
+            env.add_edge(f"F{f}_NUR{r}", con_nid, length=1.0, width=1.0, door=False)
+            env.add_edge(con_nid, nurse_nid, length=1.0, width=1.0, door=False)
+
+        # Play area connection
+        con_play = f"F{f}_NCON_PLAY"
+        env.add_node(nid=con_play, ntype="hall", length=3.0, area=6.0, floor=f)
+        env.add_edge(play_nid, con_play, length=1.0, width=1.0, door=False)
+        env.add_edge(con_play, nurse_nid, length=1.0, width=1.0, door=False)
+
+        # Kitchen connection
+        con_kit = f"F{f}_NCON_KIT"
+        env.add_node(nid=con_kit, ntype="hall", length=3.0, area=6.0, floor=f)
+        env.add_edge(kit_nid, con_kit, length=1.0, width=1.0, door=False)
+        env.add_edge(con_kit, nurse_nid, length=1.0, width=1.0, door=False)
 
     # Connect vertical circulation: stairs between floors
     for f in range(FLOORS - 1):
@@ -171,7 +191,7 @@ def build_babycare_layout() -> BuildingFireEnvironment:
     env.add_edge("EXIT_G_RIGHT", "F0_C2", length=1.0, width=1.6, door=True)
 
     # Rooftop emergency access on top floor
-    env.add_node(nid=f"F{FLOORS-1}_ROOF_EXIT", ntype="roof_exit", length=2.0, area=4.0, floor=FLOORS-1)
+    env.add_node(nid=f"F{FLOORS-1}_ROOF_EXIT", ntype="exit", length=2.0, area=4.0, floor=FLOORS-1)
     env.add_edge(f"F{FLOORS-1}_ROOF_EXIT", f"F{FLOORS-1}_C2", length=1.0, width=1.0, door=True)
 
     # Populate with staff and infants for realism
@@ -195,57 +215,58 @@ def build_babycare_layout() -> BuildingFireEnvironment:
 
 def build_two_floor_warehouse() -> BuildingFireEnvironment:
     """
-    Additional layout: compact two-floor warehouse with stairs and two exits.
-    - Floor 0: corridor C0–C2 with two storage rooms S0,S1; EXIT_F0
-    - Floor 1: corridor C3–C5 with two storage rooms S2,S3; EXIT_F1
-    - Stairs connect C1 <-> C4 (bidirectional)
+    Single-floor warehouse layout with a grid structure:
+    - Grid of hallways (H_{r}_{c})
+    - Cargo rooms between hall intersections, each connected to 4 surrounding halls
+    - Two exits on opposite sides
     """
     env = BuildingFireEnvironment()
 
-    # Floor 0 corridors
-    for i in range(3):
-        env.add_node(nid=f"C{i}", ntype="hall", length=7.0, area=14.0, floor=0)
-    env.add_edge("C0", "C1", length=7.0, width=2.2, door=False)
-    env.add_edge("C1", "C2", length=7.0, width=2.2, door=False)
+    # Single floor warehouse grid: 4x6 (larger grid for more cargo rooms)
+    ROWS = 4   # number of hallway rows
+    COLS = 6   # number of hallway columns
 
-    # Floor 0 rooms
-    env.add_node("S0", "room", length=5.0, area=20.0, floor=0)
-    env.add_node("S1", "room", length=5.0, area=20.0, floor=0)
-    env.add_edge("S0", "C0", length=1.0, width=1.0, door=True)
-    env.add_edge("S1", "C2", length=1.0, width=1.0, door=True)
+    # Create corridor grid nodes (single floor, f=0)
+    for r in range(ROWS):
+        for c in range(COLS):
+            env.add_node(nid=f"H_{r}_{c}", ntype="hall", length=10.0, area=30.0, floor=0)
 
-    # Floor 0 exit
-    env.add_node("EXIT_F0", "exit", length=2.0, area=4.0, floor=0)
-    env.add_edge("EXIT_F0", "C0", length=1.0, width=1.4, door=True)
+    # Connect corridor grid horizontally and vertically
+    for r in range(ROWS):
+        for c in range(COLS):
+            if c + 1 < COLS:
+                env.add_edge(f"H_{r}_{c}", f"H_{r}_{c+1}", length=8.0, width=3.0, door=False)
+            if r + 1 < ROWS:
+                env.add_edge(f"H_{r}_{c}", f"H_{r+1}_{c}", length=8.0, width=3.0, door=False)
 
-    # Floor 1 corridors
-    for i in range(3, 6):
-        env.add_node(nid=f"C{i}", ntype="hall", length=7.0, area=14.0, floor=1)
-    env.add_edge("C3", "C4", length=7.0, width=2.2, door=False)
-    env.add_edge("C4", "C5", length=7.0, width=2.2, door=False)
+    # Create cargo shelf rooms placed between corridor intersections so each room connects to four surrounding halls
+    # rooms indices go from 0..ROWS-2, 0..COLS-2
+    for r in range(ROWS - 1):
+        for c in range(COLS - 1):
+            rid = f"R_{r}_{c}"
+            env.add_node(nid=rid, ntype="room", length=6.0, area=40.0, floor=0)
+            # connect to four surrounding halls (top-left, top-right, bottom-left, bottom-right)
+            env.add_edge(rid, f"H_{r}_{c}", length=1.0, width=1.2, door=True)
+            env.add_edge(rid, f"H_{r}_{c+1}", length=1.0, width=1.2, door=True)
+            env.add_edge(rid, f"H_{r+1}_{c}", length=1.0, width=1.2, door=True)
+            env.add_edge(rid, f"H_{r+1}_{c+1}", length=1.0, width=1.2, door=True)
 
-    # Floor 1 rooms
-    env.add_node("S2", "room", length=5.0, area=20.0, floor=1)
-    env.add_node("S3", "room", length=5.0, area=20.0, floor=1)
-    env.add_edge("S2", "C3", length=1.0, width=1.0, door=True)
-    env.add_edge("S3", "C5", length=1.0, width=1.0, door=True)
+    # Two exits on opposite sides (left and right)
+    env.add_node(nid="EXIT_WH_LEFT", ntype="exit", length=4.0, area=8.0, floor=0)
+    env.add_node(nid="EXIT_WH_RIGHT", ntype="exit", length=4.0, area=8.0, floor=0)
+    # connect exits to edge halls (bottom left and bottom right)
+    env.add_edge("EXIT_WH_LEFT", "H_2_0", length=2.0, width=2.0, door=True)
+    env.add_edge("EXIT_WH_RIGHT", f"H_2_{COLS-1}", length=2.0, width=2.0, door=True)
 
-    # Floor 1 exit
-    env.add_node("EXIT_F1", "exit", length=2.0, area=4.0, floor=1)
-    env.add_edge("EXIT_F1", "C5", length=1.0, width=1.4, door=True)
+    # Populate with workers (forklift operators) near cargo rooms
+    for r in range(0, ROWS - 1, 2):
+        for c in range(0, COLS - 1, 2):
+            rid = f"R_{r}_{c}"
+            env.spawn_person(rid, age=35, mobility="adult", hp=100.0)
 
-    # Stairs (bidirectional, with slope)
-    env.add_edge("C1", "C4", length=4.0, width=1.5, slope=30.0, door=False)
-
-    # People
-    env.spawn_person("S0", age=30, mobility="adult", hp=100.0)
-    env.spawn_person("S1", age=62, mobility="limited", hp=95.0)
-    env.spawn_person("S2", age=25, mobility="adult", hp=100.0)
-    env.spawn_person("S3", age=12, mobility="child", hp=100.0)
-
-    # Agents
-    env.place_agent(0, "EXIT_F0")
-    env.place_agent(1, "EXIT_F1")
+    # Agents placed at the two warehouse exits
+    env.place_agent(0, "EXIT_WH_LEFT")
+    env.place_agent(1, "EXIT_WH_RIGHT")
 
     return env
 
