@@ -67,7 +67,7 @@ class NodeMeta:
     
     # Agent presence
     agent_here: bool = False          # True if any agent is at this node
-    swept: bool = False               # True if node has been searched by agent
+    sweep_count: int = 0              # Number of times node has been searched (target: 2)
     
     # Observable state (what the policy can see)
     obs_people_count: int = 0         # Observed number of people (0-3 range)
@@ -108,9 +108,15 @@ class Agent:
         path: Planned path (list of node IDs to visit)
         searching: True if currently searching a node
         search_timer: Steps remaining for current search
+        searched_nodes: Set of node IDs this agent has personally searched
+        known_swept_nodes: Set of node IDs known to be searched (shared via communication)
+        message_buffer: Messages received from other agents
     """
     agent_id: int
     node_id: str
     path: List[str] = field(default_factory=list)
     searching: bool = False
     search_timer: int = 0
+    searched_nodes: set = field(default_factory=set)  # Nodes this agent searched
+    known_swept_nodes: set = field(default_factory=set)  # Nodes known via comm
+    message_buffer: List[Dict] = field(default_factory=list)  # Incoming messages

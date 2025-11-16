@@ -44,6 +44,9 @@ class BuildingFireEnvironment:
         self.config.setdefault("sweep_node_types", {"room"})    # only rooms must be searched
         self.config.setdefault("auto_sweep_types", {"hall", "exit"})  # halls/exits auto-sweep
         self.config.setdefault("auto_sweep_on_visit", True)     # stepping onto them marks swept
+        self.config.setdefault("required_sweeps", 2)            # each room must be swept twice
+        self.config.setdefault("enable_agent_comm", True)       # agents share searched node info
+        self.config.setdefault("comm_delay", 0)                 # communication delay in time steps
         
         # Building topology
         self.G = nx.Graph()                    # NetworkX graph for topology
@@ -52,6 +55,9 @@ class BuildingFireEnvironment:
         # Entities
         self.people: Dict[int, Person] = {}    # People by ID
         self.agents: Dict[int, Agent] = {}     # Agents by ID
+        
+        # Communication system
+        self.pending_messages: List[Dict] = []  # Messages with delivery_time
         
         # Simulation state
         self.time_step = 0                     # Current simulation time
@@ -192,6 +198,7 @@ class BuildingFireEnvironment:
         # Reset time
         self.time_step = 0
         self.fire_spread_counter = 0
+        self.pending_messages = []
         
         # Reset statistics
         self.stats = {
@@ -214,7 +221,7 @@ class BuildingFireEnvironment:
         for node in self.nodes.values():
             node.on_fire = False
             node.smoky = False
-            node.swept = False
+            node.sweep_count = 0
             node.agent_here = False
             node.obs_people_count = 0
             node.obs_avg_hp = 0.0
@@ -449,10 +456,14 @@ class BuildingFireEnvironment:
         Logic:
         - Decrement search timers
         - When timer reaches 0:
-          1. Mark node as swept
-          2. Reveal all people in node
-          3. Update statistics
+          1. Increment sweep_count for the node
+          2. Add to agent's searched_nodes
+          3. Broadcast to other agents (if comm enabled)
+          4. Reveal all people in node
+          5. Update statistics
         """
+        required = self.config.get("required_sweeps", 2)
+        
         for agent in self.agents.values():
             if not agent.searching:
                continue
@@ -465,9 +476,19 @@ class BuildingFireEnvironment:
                node = self.nodes[agent.node_id]
                
                if node.ntype in self.config.get("sweep_node_types", {"room"}):
-                if not node.swept:
-                    node.swept = True
-                    self.stats["nodes_swept"] += 1
+                # Check if this specific agent has already searched this node
+                if node.nid not in agent.searched_nodes:
+                    # This agent hasn't searched here before, so it counts
+                    if node.sweep_count < required:
+                        node.sweep_count += 1
+                        self.stats["nodes_swept"] += 1
+                    
+                    # Record that this agent searched this node
+                    agent.searched_nodes.add(node.nid)
+                    
+                    # Broadcast to other agents if communication enabled
+                    if self.config.get("enable_agent_comm", True):
+                        self._broadcast_search_completion(agent.agent_id, node.nid)
 
                # --- DISCOVERY LOGIC + EVAC DISTANCE ---
                for pid in node.people:
@@ -738,23 +759,90 @@ class BuildingFireEnvironment:
 
         # Advance time
         self.time_step += 1
+        
+        # Deliver messages that have reached their delivery time
+        self._deliver_pending_messages()
     
     
     def is_sweep_complete(self) -> bool:
         sweep_kinds = self.config.get("sweep_node_types", {"room"})
+        required = self.config.get("required_sweeps", 2)
         targets = [n for n in self.nodes.values() if n.ntype in sweep_kinds]
         # If there are zero targets, define completion as False (or True if you prefer)
-        return len(targets) > 0 and all(n.swept for n in targets)
+        return len(targets) > 0 and all(n.sweep_count >= required for n in targets)
     
 
     
     def _maybe_auto_sweep_current_node(self, agent_node: "NodeMeta") -> None:
         if not self.config.get("auto_sweep_on_visit", True):
             return
+        required = self.config.get("required_sweeps", 2)
         if agent_node.ntype in self.config.get("auto_sweep_types", {"hall", "exit"}):
-            if not agent_node.swept:
-               agent_node.swept = True
+            if agent_node.sweep_count < required:
+               agent_node.sweep_count += 1
                self.stats["nodes_swept"] += 1
+
+    def _broadcast_search_completion(self, sender_id: int, node_id: str) -> None:
+        """
+        Broadcast search completion to all other agents with optional delay.
+        
+        Args:
+            sender_id: Agent who completed the search
+            node_id: Node that was searched
+        """
+        delay = self.config.get("comm_delay", 0)
+        delivery_time = self.time_step + delay
+        
+        message = {
+            "type": "search_complete",
+            "sender": sender_id,
+            "node_id": node_id,
+            "timestamp": self.time_step,
+            "delivery_time": delivery_time
+        }
+        
+        # Add to pending messages queue
+        for agent_id in self.agents.keys():
+            if agent_id != sender_id:
+                self.pending_messages.append({
+                    **message,
+                    "recipient": agent_id
+                })
+
+    def _deliver_pending_messages(self) -> None:
+        """
+        Deliver messages that have reached their delivery time.
+        """
+        # Find messages ready for delivery
+        ready_messages = [msg for msg in self.pending_messages 
+                         if msg["delivery_time"] <= self.time_step]
+        
+        # Deliver them
+        for msg in ready_messages:
+            recipient_id = msg["recipient"]
+            if recipient_id in self.agents:
+                agent = self.agents[recipient_id]
+                agent.message_buffer.append(msg)
+                agent.known_swept_nodes.add(msg["node_id"])
+        
+        # Remove delivered messages
+        self.pending_messages = [msg for msg in self.pending_messages 
+                                if msg["delivery_time"] > self.time_step]
+
+    def get_agent_known_sweeps(self, agent_id: int) -> set:
+        """
+        Get all nodes known to be swept by this agent (personal + communicated).
+        
+        Args:
+            agent_id: Agent ID
+            
+        Returns:
+            Set of node IDs known to be swept
+        """
+        if agent_id not in self.agents:
+            return set()
+        agent = self.agents[agent_id]
+        return agent.searched_nodes | agent.known_swept_nodes
 
 
     
@@ -802,7 +890,7 @@ class BuildingFireEnvironment:
             if node.smoky: hazards.append("SMOKE")
             hazard_str = ", ".join(hazards) if hazards else "clear"
             
-            swept_str = "SWEPT" if node.swept else "unswept"
+            swept_str = f"swept\u00d7{node.sweep_count}" if node.sweep_count > 0 else "unswept"
             people_str = f"{len(node.people)} people" if node.people else "empty"
             
             print(f"  {node.nid:6s} [{node.ntype:4s}]: {hazard_str:12s} | {swept_str:8s} | {people_str}")
