@@ -15,10 +15,22 @@ DEFAULT_CONFIG = {
     # Hazard spreading parameters
     "fire_spread_prob": 0.15,        # Reduced from 0.3 - more realistic spread
     "fire_spread_delay": 5,          # Increased from 2 - fire spreads slower
+    "fire_intensity_init": 1.0,      # Initial fire intensity (0-1)
+    "smoke_density_base": 0.5,       # Base smoke density when fire starts
+    "fire_intensity_growth": 0.05,    # How much fire intensity increases per timestep
+    "smoke_density_growth": 0.02,     # How much smoke density increases per timestep
     
     # Health degradation parameters (per timestep, 1 timestep = ~5 seconds)
     "hp_loss_fire": 1.0,             # Reduced from 5.0 - people survive ~8 minutes in fire
     "hp_loss_smoke": 0.3,            # Reduced from 2.0 - smoke is dangerous but slower
+    "hp_mult_adult": 1.0,            # Health multiplier for adults
+    "hp_mult_child": 0.8,            # Health multiplier for children (more vulnerable)
+    "hp_mult_limited": 0.6,          # Health multiplier for people with limited mobility
+    "responder_Xi_max": 1.0,         # Max exposure index for agents
+    "responder_exposure_fire": 0.1,  # Agent exposure to fire per timestep
+    "responder_exposure_smoke": 0.05, # Agent exposure to smoke per timestep
+    "responder_hp_loss_fire": 0.2,   # Agent HP loss in fire
+    "responder_hp_loss_smoke": 0.05, # Agent HP loss in smoke
     
     # Agent parameters (1 timestep = ~5 seconds)
     "agent_speed": 1.5,              # m/s (walking speed with gear)

@@ -151,7 +151,12 @@ class BuildingFireEnvironment:
         if ntype not in NODE_TYPES:
             raise ValueError(f"Invalid node type: {ntype}. Must be one of {list(NODE_TYPES.keys())}")
         
-        meta = NodeMeta(nid=nid, ntype=ntype, **kwargs)
+        # Filter kwargs to only include those accepted by NodeMeta
+        valid_fields = {'area', 'length', 'floor', 'on_fire', 'smoky', 'people', 
+                        'agent_here', 'sweep_count', 'obs_people_count', 'obs_avg_hp', 'dist_to_fire_norm'}
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_fields}
+        
+        meta = NodeMeta(nid=nid, ntype=ntype, **filtered_kwargs)
         self.nodes[nid] = meta
         self.G.add_node(nid)
     
@@ -168,7 +173,11 @@ class BuildingFireEnvironment:
         if u not in self.nodes or v not in self.nodes:
             raise ValueError(f"Both nodes must exist before adding edge: {u}, {v}")
         
-        edge_meta = EdgeMeta(u=u, v=v, **kwargs)
+        # Filter kwargs to only include those accepted by EdgeMeta
+        valid_fields = {'width', 'length', 'slope', 'door', 'fire_door'}
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_fields}
+        
+        edge_meta = EdgeMeta(u=u, v=v, **filtered_kwargs)
         self.G.add_edge(u, v, meta=edge_meta)
     
     
@@ -348,6 +357,8 @@ class BuildingFireEnvironment:
                 self.config["fire_intensity_init"],
                 self.config["smoke_density_base"]
             )
+        
+        return self.get_observation()
     
     
     def get_observation(self) -> Data:
@@ -549,8 +560,6 @@ class BuildingFireEnvironment:
           4. Reveal all people in node
           5. Update statistics
         """
-        required = getattr(node, "required_sweeps", self.config.get("required_sweeps", 1))
-        
         for agent in self.agents.values():
             if not agent.searching:
                continue
@@ -561,6 +570,7 @@ class BuildingFireEnvironment:
             if agent.search_timer <= 0:
                agent.searching = False
                node = self.nodes[agent.node_id]
+               required = getattr(node, "required_sweeps", self.config.get("required_sweeps", 1))
                
                if node.ntype in self.config.get("sweep_node_types", {"room"}):
                 # Check if this specific agent has already searched this node
