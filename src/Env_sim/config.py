@@ -6,8 +6,8 @@ NODE_TYPES = {
     "floor": 3,         # Floor nodes for multi-story buildings
 }
 
-# Feature dimension: F = 10 as described in the specification
-FEATURE_DIM = 10
+# Feature dimension: F = 11 (4-dim one-hot for node types: room/hall/exit/floor)
+FEATURE_DIM = 11
 
 # Default configuration values
 DEFAULT_CONFIG = {

@@ -41,18 +41,21 @@ class Person:
     being_assisted: bool = False
     assisting_agent_id: Optional[int] = None
     panicked: bool = False
+    # Speed multipliers (stored at spawn to respect per-environment config)
+    assisted_multiplier: float = 1.8
+    panic_multiplier: float = 0.7
 
     @property
     def effective_speed(self) -> float:
         """Compute effective walking speed (m/s) for the person.
 
         Priority: assisted > panicked > normal
-        Uses DEFAULT_CONFIG as a fallback; environment config may vary.
+        Uses multipliers stored at spawn time to respect per-environment config.
         """
         if self.being_assisted:
-            return self.v_class * DEFAULT_CONFIG.get('assisted_speed_multiplier', 1.0)
+            return self.v_class * self.assisted_multiplier
         if self.panicked:
-            return self.v_class * DEFAULT_CONFIG.get('panic_speed_reduction', 1.0)
+            return self.v_class * self.panic_multiplier
         return self.v_class
 
     

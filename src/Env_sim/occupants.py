@@ -168,32 +168,42 @@ def _person_route_next(env: 'BuildingFireEnvironment', person: Person) -> Option
 def _edge_cost_for_person(env: 'BuildingFireEnvironment', person: Person, 
                           u: str, v: str, edge_meta: EdgeMeta) -> float:
     """
-    Compute time-dependent edge cost for person.
+    Compute time-dependent edge cost for person (in timesteps).
     
-    Formula: c_e(t) = length/v_effective * (1 + θ·density) + hazard_penalty
+    UNITS: Returns cost in timesteps (1 timestep = ~5 seconds).
+    
+    Formula: c_e(t) = [length/v_effective * (1 + θ·density)] / 5.0 + hazard_penalty_timesteps
+    
+    Hazard penalties are applied as multiplicative factors, then converted to time cost:
+    - Fire hazard increases cost by 50%
+    - Smoke hazard increases cost by 10%
     """
     # Get effective speed (accounts for assistance and panic)
     effective_speed = person.effective_speed
     
-    # Base traversal time
-    base_time = edge_meta.length / max(effective_speed, 1e-6)
+    # Base traversal time in seconds
+    base_time_seconds = edge_meta.length / max(effective_speed, 1e-6)
     
     # Congestion factor
     density = _edge_density(env, u, v)
     theta = env.config['theta_density']
     congestion_factor = 1.0 + theta * density
     
-    # Hazard penalties
-    hazard_penalty = 0.0
+    # Apply congestion and convert to timesteps (1 timestep = 5 seconds)
+    base_time_timesteps = (base_time_seconds * congestion_factor) / 5.0
+    
+    # Hazard penalties as multiplicative factors
+    hazard_multiplier = 1.0
     u_node = env.nodes[u]
     v_node = env.nodes[v]
     
     if u_node.on_fire or v_node.on_fire:
-        hazard_penalty = env.config['hazard_penalty_fire']
+        hazard_multiplier = 1.5  # 50% increase for fire hazard
     elif u_node.smoky or v_node.smoky:
-        hazard_penalty = env.config['hazard_penalty_smoke']
+        hazard_multiplier = 1.1  # 10% increase for smoke hazard
     
-    return base_time * congestion_factor + hazard_penalty
+    # Return total cost in timesteps
+    return base_time_timesteps * hazard_multiplier
 
 
 def _edge_density(env: 'BuildingFireEnvironment', u: str, v: str) -> float:

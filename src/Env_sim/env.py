@@ -271,7 +271,9 @@ class BuildingFireEnvironment:
             hp=hp,
             node_id=node_id,
             v_class=v_class,
-            awareness_timer=delay
+            awareness_timer=delay,
+            assisted_multiplier=self.config.get('assisted_speed_multiplier', 1.8),
+            panic_multiplier=self.config.get('panic_speed_reduction', 0.7)
         )
         
         # Register person
@@ -414,7 +416,9 @@ class BuildingFireEnvironment:
                     mobility=mobility,
                     hp=hp,
                     node_id=node_id,
-                    v_class=v_class
+                    v_class=v_class,
+                    assisted_multiplier=self.config.get('assisted_speed_multiplier', 1.8),
+                    panic_multiplier=self.config.get('panic_speed_reduction', 0.7)
                 )
                 self.people[pid] = person
             else:
@@ -1049,26 +1053,26 @@ class BuildingFireEnvironment:
     
     def get_node_features(self, node: NodeMeta) -> np.ndarray:
         """
-        Construct the 10-dimensional feature vector for a node.
+        Construct the 11-dimensional feature vector for a node.
         
-        Feature breakdown (F = 10):
-        [0:3]   One-hot node type (room/hall/exit)
-        [3]     Fire indicator (0 or 1)
-        [4]     Smoke indicator (0 or 1)
-        [5]     Length normalized by 10m
-        [6]     Observable people count (0-3, normalized)
-        [7]     Observable average HP (0-1)
-        [8]     Agent presence indicator (0 or 1)
-        [9]     Distance to nearest fire (0-1, normalized)
+        Feature breakdown (F = 11):
+        [0:4]   One-hot node type (room/hall/exit/floor)
+        [4]     Fire indicator (0 or 1)
+        [5]     Smoke indicator (0 or 1)
+        [6]     Length normalized by 10m
+        [7]     Observable people count (0-3, normalized)
+        [8]     Observable average HP (0-1)
+        [9]     Agent presence indicator (0 or 1)
+        [10]    Distance to nearest fire (0-1, normalized)
         
         Args:
             node: Node to featurize
         
         Returns:
-            10D numpy array of float32 features
+            11D numpy array of float32 features
         """
-        # Features 0-2: One-hot encoding of node type
-        one_hot = np.zeros(3, dtype=np.float32)
+        # Features 0-3: One-hot encoding of node type (4 types: room/hall/exit/floor)
+        one_hot = np.zeros(len(NODE_TYPES), dtype=np.float32)
         one_hot[NODE_TYPES[node.ntype]] = 1.0
         
         # Feature 3: Fire indicator
@@ -1094,14 +1098,14 @@ class BuildingFireEnvironment:
         
         # Assemble feature vector
         features = np.array([
-            *one_hot,           # [0:3]
-            fire,               # [3]
-            smoke,              # [4]
-            length_norm,        # [5]
-            people_count_norm,  # [6]
-            avg_hp_norm,        # [7]
-            agent_here,         # [8]
-            dist_fire           # [9]
+            *one_hot,           # [0:4] one-hot for 4 node types
+            fire,               # [4]
+            smoke,              # [5]
+            length_norm,        # [6]
+            people_count_norm,  # [7]
+            avg_hp_norm,        # [8]
+            agent_here,         # [9]
+            dist_fire           # [10]
         ], dtype=np.float32)
         
         assert features.shape[0] == FEATURE_DIM, \

@@ -80,10 +80,17 @@ def degrade_health(
     - People in fire lose HP faster than people in smoke
     - HP cannot go below 0
     - Dead people (HP=0) are tracked but no longer degrade
+    - Skip people with invalid node_id (robustness guard)
     """
     for person in people.values():
         if not person.is_alive:
             continue  # Skip dead people
+        
+        # Guard: check that node_id is valid
+        if person.node_id not in nodes:
+            if verbose:
+                print(f"[T={time_step}] Warning: Person {person.pid} has invalid node_id: {person.node_id}")
+            continue
 
         node = nodes[person.node_id]
         hp_loss = 0.0
