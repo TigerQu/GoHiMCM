@@ -29,7 +29,7 @@ class PPOConfig:
     num_agents: int = 2                    # Number of firefighter agents
     max_actions: int = 15                  # Max action space size
     
-    # PPO hyperparameters
+    # PPO hyperparameters (optimized for RTX 5090)
     lr_policy: float = 3e-4                # Policy learning rate
     lr_value: float = 1e-3                 # Value learning rate
     gamma: float = 0.99                    # Discount factor
@@ -39,17 +39,18 @@ class PPOConfig:
     value_loss_coef: float = 0.5           # Value loss weight
     max_grad_norm: float = 0.5             # Gradient clipping threshold
     
-    # Training configuration
+    # Training configuration (RTX 5090 optimized - larger batches)
     num_iterations: int = 10000            # Total training iterations
-    steps_per_rollout: int = 100           # Max steps per episode
-    num_ppo_epochs: int = 4                # PPO update epochs per iteration
+    steps_per_rollout: int = 200           # Max steps per episode (increased for GPU)
+    num_ppo_epochs: int = 8                # PPO update epochs per iteration (increased)
     num_parallel_envs: int = 1             # Number of parallel environments (1=no parallel)
+    batch_size: int = 64                   # Minibatch size for updates (RTX 5090 can handle large batches)
     
     # Evaluation configuration
-    eval_interval: int = 20                # Evaluate every N iterations
-    num_eval_episodes: int = 10            # Episodes per evaluation
-    num_train_layouts: int = 40            # Training layout seeds
-    num_eval_layouts: int = 10             # Evaluation layout seeds
+    eval_interval: int = 50                # Evaluate every N iterations (less frequent for speed)
+    num_eval_episodes: int = 20            # Episodes per evaluation (increased for better stats)
+    num_train_layouts: int = 100           # Training layout seeds (increased diversity)
+    num_eval_layouts: int = 20             # Evaluation layout seeds (increased)
     
     # Logging configuration
     log_interval: int = 10                 # Log every N iterations
@@ -87,26 +88,32 @@ class PPOConfig:
         if scenario == "office":
             return cls(
                 scenario="office",
-                experiment_name="office_baseline",
+                experiment_name="office_baseline_rtx5090",
                 num_iterations=10000,
-                steps_per_rollout=100,
+                steps_per_rollout=200,
+                num_ppo_epochs=8,
+                batch_size=64,
             )
         
         elif scenario == "daycare":
             return cls(
                 scenario="daycare",
-                experiment_name="daycare_baseline",
-                num_iterations=10000,         # More iterations for complex scenario
-                steps_per_rollout=150,       # Longer episodes
+                experiment_name="daycare_baseline_rtx5090",
+                num_iterations=15000,        # More iterations for complex scenario
+                steps_per_rollout=250,       # Longer episodes (GPU optimized)
+                num_ppo_epochs=8,
+                batch_size=64,
                 entropy_coef=0.02,           # Higher exploration for multi-floor
             )
         
         elif scenario == "warehouse":
             return cls(
                 scenario="warehouse",
-                experiment_name="warehouse_baseline",
-                num_iterations=10000,
-                steps_per_rollout=120,
+                experiment_name="warehouse_baseline_rtx5090",
+                num_iterations=15000,
+                steps_per_rollout=200,
+                num_ppo_epochs=8,
+                batch_size=64,
                 lr_policy=1e-4,              # Lower LR for sparse rewards
             )
         

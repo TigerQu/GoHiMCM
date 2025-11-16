@@ -42,21 +42,22 @@ class Policy(nn.Module):
         self.gat = GAT()
         
         # ===== CHANGE 2: Fixed input dimension to match GAT output =====
-        # GAT outputs 24-dim embeddings per node
-        # We concatenate: [agent_node_embedding (24) + global_embedding (24)] = 48
-        self.agent_feature_dim = 24  # From GAT output
-        self.input_dim = self.agent_feature_dim * 2  # Agent + global
+        # GAT outputs 48-dim embeddings per node (updated for RTX 5090)
+        # We concatenate: [agent_node_embedding (48) + global_embedding (48)] = 96
+        self.agent_feature_dim = 48  # From GAT output (increased from 24)
+        self.input_dim = self.agent_feature_dim * 2  # Agent + global = 96
         
         # ===== CHANGE 3: Output dimension matches action space =====
         # Actions: 0=wait, 1=search, 2...k=move_neighbor_i
         # We'll use max_actions and mask invalid ones
+        # Larger network for RTX 5090
         self.action_head = nn.Sequential(
-            nn.Linear(self.input_dim, 64),
+            nn.Linear(self.input_dim, 128),  # Increased from 64
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(64, 32),
+            nn.Linear(128, 64),  # Increased from 32
             nn.ReLU(),
-            nn.Linear(32, self.max_actions)  # Logits for all possible actions
+            nn.Linear(64, self.max_actions)  # Logits for all possible actions
         )
         
     
@@ -87,7 +88,7 @@ class Policy(nn.Module):
             
         Returns:
             action_logits (Tensor[num_agents, max_actions]): Logits for each agent's actions
-            node_embeddings (Tensor[N, 24]): Node embeddings (for value function reuse)
+            node_embeddings (Tensor[N, 48]): Node embeddings (for value function reuse)
         
         Example:
             obs = env.get_observation()
@@ -97,22 +98,22 @@ class Policy(nn.Module):
             # Apply action masking, then sample actions
         """
         # ===== Step 1: Process entire building graph through GAT =====
-        node_embeddings = self.gat(data)  # [N, 24]
+        node_embeddings = self.gat(data)  # [N, 48]
         
         # ===== Step 2: Get global building state =====
-        global_embedding = self.gat.get_global_embedding(node_embeddings)  # [24]
+        global_embedding = self.gat.get_global_embedding(node_embeddings)  # [48]
         
         # ===== Step 3: Extract agent-specific features =====
         # For each agent, get their node's embedding + global context
         agent_features = []
         for i in range(self.num_agents):
             agent_idx = agent_node_indices[i]
-            agent_node_emb = node_embeddings[agent_idx]  # [24]
+            agent_node_emb = node_embeddings[agent_idx]  # [48]
             # Concatenate agent's local view with global context
-            agent_feat = torch.cat([agent_node_emb, global_embedding], dim=-1)  # [48]
+            agent_feat = torch.cat([agent_node_emb, global_embedding], dim=-1)  # [96]
             agent_features.append(agent_feat)
         
-        agent_features = torch.stack(agent_features)  # [num_agents, 48]
+        agent_features = torch.stack(agent_features)  # [num_agents, 96]
         
         # ===== Step 4: Compute action logits for each agent =====
         action_logits = self.action_head(agent_features)  # [num_agents, max_actions]
@@ -144,13 +145,16 @@ class Policy(nn.Module):
             log_probs (Tensor[num_agents]): Log probabilities of selected actions
             action_probs (Tensor[num_agents, max_actions]): Full probability distribution
         """
+        # Get device from agent_node_indices
+        device = agent_node_indices.device
+        
         # Get logits
         action_logits, _ = self.forward(data, agent_node_indices)  # [num_agents, max_actions]
         
         # ===== Apply action masking =====
         # Map action strings to indices
         # Convention: 0=wait, 1=search, 2+=move_X
-        action_masks = torch.zeros_like(action_logits, dtype=torch.bool)
+        action_masks = torch.zeros_like(action_logits, dtype=torch.bool, device=device)
         
         for i, valid_actions in enumerate(valid_actions_list):
             for action_str in valid_actions:
@@ -172,7 +176,7 @@ class Policy(nn.Module):
             actions = torch.multinomial(action_probs, num_samples=1).squeeze(-1)  # [num_agents]
         
         # Compute log probabilities of selected actions
-        log_probs = torch.log(action_probs[torch.arange(self.num_agents), actions] + 1e-8)
+        log_probs = torch.log(action_probs[torch.arange(self.num_agents, device=device), actions] + 1e-8)
         
         return actions, log_probs, action_probs
     
@@ -316,17 +320,18 @@ class Value(nn.Module):
         self.gat = GAT()
         
         # ===== CHANGE 7: Fixed input dimension =====
-        # Same as policy: agent_embedding (24) + global_embedding (24) = 48
-        self.input_dim = 48
+        # Same as policy: agent_embedding (48) + global_embedding (48) = 96
+        self.input_dim = 96  # Updated from 48
         
         # Value head outputs single scalar value
+        # Larger network for RTX 5090
         self.value_head = nn.Sequential(
-            nn.Linear(self.input_dim, 64),
+            nn.Linear(self.input_dim, 128),  # Increased from 64
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(64, 32),
+            nn.Linear(128, 64),  # Increased from 32
             nn.ReLU(),
-            nn.Linear(32, 1)  # Single value output
+            nn.Linear(64, 1)  # Single value output
         )
 
     
@@ -358,10 +363,10 @@ class Value(nn.Module):
             values (Tensor[num_agents] or Tensor[1]): State value estimates
         """
         # Process building graph
-        node_embeddings = self.gat(data)  # [N, 24]
+        node_embeddings = self.gat(data)  # [N, 48]
         
         # Get global state
-        global_embedding = self.gat.get_global_embedding(node_embeddings)  # [24]
+        global_embedding = self.gat.get_global_embedding(node_embeddings)  # [48]
         
         if agent_node_indices is not None:
             # Agent-specific values (like policy)
@@ -369,13 +374,13 @@ class Value(nn.Module):
             for i in range(self.num_agents):
                 agent_idx = agent_node_indices[i]
                 agent_node_emb = node_embeddings[agent_idx]
-                agent_feat = torch.cat([agent_node_emb, global_embedding], dim=-1)  # [48]
+                agent_feat = torch.cat([agent_node_emb, global_embedding], dim=-1)  # [96]
                 value = self.value_head(agent_feat)  # [1]
                 values.append(value)
             return torch.cat(values)  # [num_agents]
         else:
             # Global value (pooled state only)
-            global_feat = torch.cat([global_embedding, global_embedding], dim=-1)  # [48]
+            global_feat = torch.cat([global_embedding, global_embedding], dim=-1)  # [96]
             return self.value_head(global_feat)  # [1]
     
     

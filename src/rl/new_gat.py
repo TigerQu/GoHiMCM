@@ -29,9 +29,10 @@ class GAT(nn.Module):
         
         # Define the GAT layers with consistent dimensions
         # ===== CHANGE 2: Defined explicit hidden dimensions for clarity =====
-        self.hidden_dim1 = 32
-        self.hidden_dim2 = 48
-        self.hidden_dim3 = 24  # Final embedding dimension
+        # Optimized for RTX 5090 - larger hidden dimensions
+        self.hidden_dim1 = 64  # Increased from 32
+        self.hidden_dim2 = 96  # Increased from 48
+        self.hidden_dim3 = 48  # Increased from 24 for richer representations
         
         self.gat1 = GATConv(
             in_channels=in_dim,              # 11 from environment
@@ -91,14 +92,14 @@ class GAT(nn.Module):
                 - (optional) edge_attr: Edge features
             
         Returns:
-            out (Tensor[N, 24]): Node embeddings for all nodes in the building
+            out (Tensor[N, 48]): Node embeddings for all nodes in the building
                                  Shape is [N, hidden_dim3] where N = number of nodes
         
         Example usage:
             obs = env.get_observation()  # Returns Data object
-            node_embeddings = gat(obs)   # [N, 24]
+            node_embeddings = gat(obs)   # [N, 48]
             agent_idx = env.get_agent_node_index(0)
-            agent_embedding = node_embeddings[agent_idx]  # [24]
+            agent_embedding = node_embeddings[agent_idx]  # [48]
         """
         # ===== CHANGE 5: Extract x and edge_index from Data object =====
         # Original code expected separate tensors, now we unpack from Data
@@ -122,10 +123,10 @@ class GAT(nn.Module):
         out = self.gat3(out, edge_index)
         # No normalization or activation on final layer (standard practice)
         
-        # ===== CHANGE 6: Return full node embeddings [N, 24] =====
+        # ===== CHANGE 6: Return full node embeddings [N, 48] =====
         # Original code didn't return anything clearly
         # Now we return embeddings for ALL nodes so Policy can extract agent-specific ones
-        return out  # Shape: [N, 24] where N is number of nodes in building
+        return out  # Shape: [N, 48] where N is number of nodes in building
     
     
     def get_global_embedding(self, node_embeddings: torch.Tensor) -> torch.Tensor:
