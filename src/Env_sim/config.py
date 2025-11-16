@@ -1,9 +1,9 @@
 # Node type encoding for one-hot vectors 
 NODE_TYPES = {
-    "room": 0,    # Regular rooms where people may be located
-    "hall": 1,    # Hallways connecting rooms
-    "exit": 2,     # Exit points of the building
-    "floor": 3,    # Floor nodes for multi-story buildings
+    "room": 0,          # Regular rooms where people may be located (includes nursery, nurse_room, play_area, kitchen, cargo_room)
+    "hall": 1,          # Hallways connecting rooms (includes nurse_hall)
+    "exit": 2,          # Exit points of the building (includes roof_exit)
+    "floor": 3,         # Floor nodes for multi-story buildings
 }
 
 # Feature dimension: F = 10 as described in the specification
