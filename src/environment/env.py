@@ -87,8 +87,56 @@ class BuildingFireEnvironment:
         # RNG for determinism
         self._rng = random.Random()
         self._np_rng = np.random.RandomState()
+
+    def _update_responder_exposure(self) -> None:
+        #Update responder HP and exposure based on hazard exposure.
+        Xi_max = self.config["responder_Xi_max"]
+        for agent in self.agents.values():
+            # Skip already inactive agents
+            if not getattr(agent, "is_active", True):
+               continue
+
+        node = self.nodes[agent.node_id]
+        hp_loss = 0.0
+        exposure_gain = 0.0
+
+        if node.on_fire:
+            hp_loss = self.config["responder_hp_loss_fire"]
+            exposure_gain = self.config["responder_exposure_fire"]
+        elif node.smoky:
+            hp_loss = self.config["responder_hp_loss_smoke"]
+            exposure_gain = self.config["responder_exposure_smoke"]
+
+        if hp_loss > 0 or exposure_gain > 0:
+            agent.hp = max(0.0, agent.hp - hp_loss)
+            agent.exposure += exposure_gain
+
+        # Deactivate if over exposure limit or HP depleted
+        if agent.exposure > Xi_max or agent.hp <= 0.0:
+            agent.active = 
+            
+        # Add this new method to BuildingFireEnvironment class:
+    def compute_high_risk_redundancy(self) -> float:
+        """Compute fraction of high-risk rooms with at least 2 independent passes."""
+        high = [n for n in self.nodes.values() if n.risk_level == "high"]
+        if not high:
+            return 0.0
+        covered = [n for n in high if n.sweep_count >= 2]
+        return len(covered) / len(high)
+   
         
-        
+    #helpers for edge load tracking
+    def _edge_inc(self, u: str, v: str) -> None:
+        """Increment edge load counter (person entering edge)."""
+        key = (u, v) if u < v else (v, u)
+        self._edge_load[key] = self._edge_load.get(key, 0) + 1
+    
+    def _edge_dec(self, u: str, v: str) -> None:
+        """Decrement edge load counter (person leaving edge)."""
+        key = (u, v) if u < v else (v, u)
+        if key in self._edge_load:
+            self._edge_load[key] = max(0, self._edge_load[key] - 1)
+
     # construct building
     
     def add_node(self, nid: str, ntype: str, **kwargs) -> None:
@@ -125,7 +173,14 @@ class BuildingFireEnvironment:
     
     
     def spawn_person(self, node_id: str, age: int, mobility: str, hp: float = 100.0) -> int:
-        """Spawn person at location."""
+        """
+        Spawn person at location with mobility-appropriate tenability threshold.
+        
+        Tenability thresholds model physiological vulnerability:
+        - Children: 60 HP (more vulnerable, become incapacitated earlier)
+        - Limited mobility: 50 HP (vulnerable due to pre-existing conditions)
+        - Adults: 40 HP (baseline)
+        """
         if node_id not in self.nodes:
             raise ValueError(f"Node {node_id} does not exist")
         
@@ -147,6 +202,15 @@ class BuildingFireEnvironment:
             pid=pid, age=age, mobility=mobility, hp=hp,
             node_id=node_id, v_class=v_class, awareness_timer=delay
         )
+        
+        # NEW: Set tenability threshold based on mobility category
+        if mobility == "child":
+            person.tenability_threshold = 60.0  # More vulnerable
+        elif mobility == "limited":
+            person.tenability_threshold = 50.0  # Moderately vulnerable
+        else:  # adult or other
+            person.tenability_threshold = 40.0  # Baseline
+        
         self.people[pid] = person
         self.nodes[node_id].people.append(pid)
         
@@ -221,12 +285,16 @@ class BuildingFireEnvironment:
         for node in self.nodes.values():
             node.on_fire = False
             node.smoky = False
+            # NEW: Reset continuous intensity fields
+            node.fire_intensity = 0.0
+            node.smoke_density = 0.0
+            
             node.sweep_count = 0
             node.agent_here = False
             node.obs_people_count = 0
             node.obs_avg_hp = 0.0
             node.people = []  # Clear people lists
-        
+            
         # Reset all people to initial state
         for pid, (node_id, age, mobility, hp) in enumerate(self._initial_people_state):
             person = self.people[pid]
@@ -265,13 +333,21 @@ class BuildingFireEnvironment:
             # Random room
             rooms = [n.nid for n in self.nodes.values() if n.ntype == "room"]
             if rooms:
-                _ignite_node(self.nodes, random.choice(rooms))
+                # NEW: Pass intensity config to ignite_node
+                _ignite_node(
+                    self.nodes, 
+                    random.choice(rooms),
+                    self.config["fire_intensity_init"],
+                    self.config["smoke_density_base"]
+                )
         elif fire_node != "none":
-            _ignite_node(self.nodes, fire_node)
-        
-        # Get initial observation
-        observation = self.get_observation()
-        return observation
+            # NEW: Pass intensity config to ignite_node
+            _ignite_node(
+                self.nodes, 
+                fire_node,
+                self.config["fire_intensity_init"],
+                self.config["smoke_density_base"]
+            )
     
     
     def get_observation(self) -> Data:
@@ -405,13 +481,12 @@ class BuildingFireEnvironment:
             True if move successful, False otherwise
         """
         if agent_id not in self.agents:
-            return False
-        
+          return False
+    
         agent = self.agents[agent_id]
-        current_node = agent.node_id
-        
-        # Check if target is adjacent
-        if target_node_id not in self.G.neighbors(current_node):
+    
+        # NEW: Check if agent is active
+        if hasattr(agent, "is_active") and not agent.is_active:
             return False
         
         # Move agent
@@ -444,8 +519,20 @@ class BuildingFireEnvironment:
             return False
         
         # Start search
+        if hasattr(agent, "is_active") and not agent.is_active:
+           return False
         agent.searching = True
-        agent.search_timer = self.config["search_time"]
+        # Determine search duration in timesteps.
+        # Prefer an explicit `search_time` config (timesteps). If absent,
+        # compute from `search_time_per_sqm` (seconds per sqm) using 1 timestep = 5s.
+        if "search_time" in self.config:
+            agent.search_timer = int(self.config["search_time"])
+        else:
+            area = getattr(self.nodes.get(agent.node_id), "area", 10.0)
+            secs_per_sqm = float(self.config.get("search_time_per_sqm", 0.5))
+            total_seconds = area * secs_per_sqm
+            # convert to timesteps (1 timestep ~= 5 seconds)
+            agent.search_timer = max(1, int(round(total_seconds / 5.0)))
         return True
     
     
@@ -462,7 +549,7 @@ class BuildingFireEnvironment:
           4. Reveal all people in node
           5. Update statistics
         """
-        required = self.config.get("required_sweeps", 2)
+        required = getattr(node, "required_sweeps", self.config.get("required_sweeps", 1))
         
         for agent in self.agents.values():
             if not agent.searching:
@@ -511,16 +598,12 @@ class BuildingFireEnvironment:
     # Oberservation and feature extraction
     
     def _update_agent_positions(self) -> None:
-        """
-        Update agent_here flags for all nodes based on current agent positions.
-        """
-        # Clear all flags
         for node in self.nodes.values():
             node.agent_here = False
-        
-        # Set flags for occupied nodes
         for agent in self.agents.values():
-            self.nodes[agent.node_id].agent_here = True
+            # Only count active agents
+            if getattr(agent, "is_active", True):
+               self.nodes[agent.node_id].agent_here = True
     
     
     def _update_observations(self) -> None:
@@ -602,10 +685,10 @@ class BuildingFireEnvironment:
         one_hot[NODE_TYPES[node.ntype]] = 1.0
         
         # Feature 4: Fire indicator
-        fire = 1.0 if node.on_fire else 0.0
+        fire = getattr(node, "fire_intensity", 1.0 if node.on_fire else 0.0)
         
         # Feature 5: Smoke indicator
-        smoke = 1.0 if node.smoky else 0.0
+        smoke = getattr(node, "smoke_density", 1.0 if node.smoky else 0.0)
         
         # Feature 6: Normalized length
         length_norm = node.length / 10.0
@@ -739,44 +822,53 @@ class BuildingFireEnvironment:
         # Process searches
         self.process_searches()
         
-        # Spread hazards
         self.fire_spread_counter = _spread_hazards(
-            self.G, self.nodes,
-            self.config["fire_spread_prob"],
-            self.fire_spread_counter,
-            self.config["fire_spread_delay"]
-        )
+        self.G, self.nodes,
+        self.config["fire_spread_prob"],
+        self.fire_spread_counter,
+        self.config["fire_spread_delay"],
+        # Add new parameters
+        self.config["fire_intensity_init"],
+        self.config["fire_intensity_growth"],
+        self.config["smoke_density_base"],
+        self.config["smoke_density_growth"]
+)
+
         # Move civilians
         _move_civilians(self)
 
         
         # Health degradation
         _degrade_health(
-            self.nodes, self.people,
-            self.config["hp_loss_fire"], self.config["hp_loss_smoke"],
-            self.time_step, verbose=False
-        )
+        self.nodes, self.people,
+        self.config["hp_loss_fire"], self.config["hp_loss_smoke"],
+        # Add multipliers
+        self.config["hp_mult_child"],
+        self.config["hp_mult_adult"],
+        self.config["hp_mult_limited"],
+        self.time_step, verbose=False
+)
 
+        self._update_responder_exposure()
         # Advance time
         self.time_step += 1
-        
+
         # Deliver messages that have reached their delivery time
         self._deliver_pending_messages()
     
     
     def is_sweep_complete(self) -> bool:
-        sweep_kinds = self.config.get("sweep_node_types", {"room"})
-        required = self.config.get("required_sweeps", 2)
-        targets = [n for n in self.nodes.values() if n.ntype in sweep_kinds]
-        # If there are zero targets, define completion as False (or True if you prefer)
-        return len(targets) > 0 and all(n.sweep_count >= required for n in targets)
+       sweep_kinds = self.config.get("sweep_node_types", {"room"})
+       targets = [n for n in self.nodes.values() if n.ntype in sweep_kinds]
+       # Use per-node required_sweeps
+       return len(targets) > 0 and all(n.sweep_count >= n.required_sweeps for n in targets)
     
 
     
     def _maybe_auto_sweep_current_node(self, agent_node: "NodeMeta") -> None:
         if not self.config.get("auto_sweep_on_visit", True):
             return
-        required = self.config.get("required_sweeps", 2)
+        required = getattr(agent_node, "required_sweeps", self.config.get("required_sweeps", 1))
         if agent_node.ntype in self.config.get("auto_sweep_types", {"hall", "exit"}):
             if agent_node.sweep_count < required:
                agent_node.sweep_count += 1
