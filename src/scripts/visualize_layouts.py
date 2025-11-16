@@ -14,7 +14,7 @@ import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import networkx as nx
 import matplotlib.pyplot as plt
-from Env_sim.layouts import (
+from environment.layouts import (
     build_standard_office_layout,
     build_babycare_layout,
     build_two_floor_warehouse,

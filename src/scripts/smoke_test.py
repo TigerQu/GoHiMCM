@@ -3,8 +3,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import networkx as nx
 
-from Env_sim.layouts import build_standard_office_layout
-from Env_sim.env import BuildingFireEnvironment
+from environment.layouts import build_standard_office_layout
+from environment.env import BuildingFireEnvironment
 
 if __name__ == "__main__":
     print("Building Fire Evacuation Simulation (no-reward test)")

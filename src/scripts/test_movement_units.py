@@ -11,9 +11,9 @@ Validates that Fix #2 (civilian traversal time units) works correctly:
 import sys
 sys.path.insert(0, '/Users/Admin/Desktop/HIMCM 26/GoHiMCM')
 
-from src.Env_sim.env import BuildingFireEnvironment
-from src.Env_sim.entities import Person, EdgeMeta
-from src.Env_sim.occupants import _edge_cost_for_person
+from src.environment.env import BuildingFireEnvironment
+from src.environment.entities import Person, EdgeMeta
+from src.environment.occupants import _edge_cost_for_person
 
 def test_movement_time_units():
     """Test that movement times are in consistent units."""

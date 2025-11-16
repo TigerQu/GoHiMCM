@@ -13,7 +13,7 @@ Tests all three layout builders (office, babycare, warehouse) to ensure:
 import sys
 sys.path.insert(0, '/Users/Admin/Desktop/HIMCM 26/GoHiMCM')
 
-from src.Env_sim.layouts import (
+from src.environment.layouts import (
     build_standard_office_layout,
     build_babycare_layout,
     build_two_floor_warehouse

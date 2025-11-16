@@ -9,7 +9,7 @@ specifically testing Fix #3: Person.effective_speed uses per-env config.
 import sys
 sys.path.insert(0, '/Users/Admin/Desktop/HIMCM 26/GoHiMCM')
 
-from src.Env_sim.layouts import build_standard_office_layout
+from src.environment.layouts import build_standard_office_layout
 
 def test_config_overrides():
     """Test that custom config multipliers are respected by Person.effective_speed."""
@@ -41,8 +41,8 @@ def test_config_overrides():
     }
     
     # Build layout first, then create with custom config before spawning people
-    from src.Env_sim.env import BuildingFireEnvironment
-    from src.Env_sim.config import DEFAULT_CONFIG
+    from src.environment.env import BuildingFireEnvironment
+    from src.environment.config import DEFAULT_CONFIG
     
     env_custom = BuildingFireEnvironment(config=custom_config)
     

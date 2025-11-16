@@ -587,18 +587,18 @@ class BuildingFireEnvironment:
         Construct the 10-dimensional feature vector for a node.
         
         Feature breakdown (F = 10):
-        [0:3]   One-hot node type (room/hall/exit)
-        [3]     Fire indicator (0 or 1)
-        [4]     Smoke indicator (0 or 1)
-        [5]     Length normalized by 10
-        [6]     People count normalized (capped at 3, divided by 3)
-        [7]     Average HP normalized (divided by 100)
-        [8]     Agent presence indicator (0 or 1)
-        [9]     Distance to fire normalized (divided by 10, capped at 1)
+        [0:4]   One-hot node type (room/hall/exit/floor)
+        [4]     Fire indicator (0 or 1)
+        [5]     Smoke indicator (0 or 1)
+        [6]     Length normalized by 10
+        [7]     People count normalized (capped at 3, divided by 3)
+        [8]     Average HP normalized (divided by 100)
+        [9]     Agent presence indicator (0 or 1)
+        [10]    Distance to fire normalized (divided by 10, capped at 1)
         """
         import numpy as np  # local import to avoid circulars in some IDEs
-        # Features 1-3: One-hot encoding of node type
-        one_hot = np.zeros(3, dtype=np.float32)
+        # Features 0-3: One-hot encoding of node type (4 types)
+        one_hot = np.zeros(len(NODE_TYPES), dtype=np.float32)
         one_hot[NODE_TYPES[node.ntype]] = 1.0
         
         # Feature 4: Fire indicator
@@ -624,14 +624,14 @@ class BuildingFireEnvironment:
         
         # Assemble feature vector
         features = np.array([
-            *one_hot,           # [0:3]
-            fire,               # [3]
-            smoke,              # [4]
-            length_norm,        # [5]
-            people_count_norm,  # [6]
-            avg_hp_norm,        # [7]
-            agent_here,         # [8]
-            dist_fire           # [9]
+            *one_hot,           # [0:4] one-hot for 4 node types
+            fire,               # [4]
+            smoke,              # [5]
+            length_norm,        # [6]
+            people_count_norm,  # [7]
+            avg_hp_norm,        # [8]
+            agent_here,         # [9]
+            dist_fire           # [10]
         ], dtype=np.float32)
         
         assert features.shape[0] == FEATURE_DIM, f"Feature dimension mismatch: {features.shape[0]} != {FEATURE_DIM}"
