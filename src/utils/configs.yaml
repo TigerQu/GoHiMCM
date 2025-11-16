@@ -1,0 +1,8 @@
+gat:
+  heads: 8
+  dropout: 0.3
+ppo:
+  discount_factor: 0.99
+  gae_decay: 0.98
+  clipping_param: 0.2
+  entropy_coef: 0.01

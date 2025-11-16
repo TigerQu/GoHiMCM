@@ -1,9 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
 
-# Import default config for fallback speed multipliers
-from .config import DEFAULT_CONFIG
-
 # DATA CLASSES
 
 @dataclass
@@ -37,26 +34,6 @@ class Person:
     v_class: float = 1.2
     evac_distance: Optional[float] = None  # shortest path length to any exit at discovery
     evac_path: Optional[List[str]] = None
-    # Assistance / panic state
-    being_assisted: bool = False
-    assisting_agent_id: Optional[int] = None
-    panicked: bool = False
-    # Speed multipliers (stored at spawn to respect per-environment config)
-    assisted_multiplier: float = 1.8
-    panic_multiplier: float = 0.7
-
-    @property
-    def effective_speed(self) -> float:
-        """Compute effective walking speed (m/s) for the person.
-
-        Priority: assisted > panicked > normal
-        Uses multipliers stored at spawn time to respect per-environment config.
-        """
-        if self.being_assisted:
-            return self.v_class * self.assisted_multiplier
-        if self.panicked:
-            return self.v_class * self.panic_multiplier
-        return self.v_class
 
     
     @property
@@ -90,7 +67,7 @@ class NodeMeta:
     
     # Agent presence
     agent_here: bool = False          # True if any agent is at this node
-    swept: bool = False               # True if node has been searched by agent
+    sweep_count: int = 0              # Number of times node has been searched (target: 2)
     
     # Observable state (what the policy can see)
     obs_people_count: int = 0         # Observed number of people (0-3 range)
@@ -131,16 +108,15 @@ class Agent:
         path: Planned path (list of node IDs to visit)
         searching: True if currently searching a node
         search_timer: Steps remaining for current search
+        searched_nodes: Set of node IDs this agent has personally searched
+        known_swept_nodes: Set of node IDs known to be searched (shared via communication)
+        message_buffer: Messages received from other agents
     """
     agent_id: int
     node_id: str
     path: List[str] = field(default_factory=list)
     searching: bool = False
     search_timer: int = 0
-    # movement state (in-transit along an edge)
-    on_edge: bool = False
-    edge_u: Optional[str] = None
-    edge_v: Optional[str] = None
-    edge_eta: float = 0.0
-    # If agent is escorting a person, store that person's id
-    assisting_person_id: Optional[int] = None
+    searched_nodes: set = field(default_factory=set)  # Nodes this agent searched
+    known_swept_nodes: set = field(default_factory=set)  # Nodes known via comm
+    message_buffer: List[Dict] = field(default_factory=list)  # Incoming messages

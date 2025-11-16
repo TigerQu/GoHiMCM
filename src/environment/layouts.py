@@ -128,7 +128,7 @@ def build_babycare_layout() -> BuildingFireEnvironment:
     env = BuildingFireEnvironment()
 
     FLOORS = 3  # reduced to 3 floors for clearer visualization
-    # For each floor create 3 corridor segments (C0, C1, C2), 3 nurseries, 1 nurse room, 1 play area, 1 kitchen
+    # For each floor create 3 corridor segments (C0, C1, C2), 6 nurseries, 1 nurse room, 2 play areas, 1 kitchen, 1 storage room
     for f in range(FLOORS):
         # Corridors
         for i in range(3):
@@ -138,46 +138,42 @@ def build_babycare_layout() -> BuildingFireEnvironment:
         env.add_edge(f"F{f}_C0", f"F{f}_C1", length=8.0, width=2.2, door=False)
         env.add_edge(f"F{f}_C1", f"F{f}_C2", length=8.0, width=2.2, door=False)
 
-        # Nurseries (3 per floor)
-        for r in range(3):
+        # Nurseries (6 per floor - 2 per corridor)
+        for r in range(6):
             nid = f"F{f}_NUR{r}"
+            corridor = f"F{f}_C{r // 2}"  # 0-1 → C0, 2-3 → C1, 4-5 → C2
             env.add_node(nid=nid, ntype="room", length=5.0, area=20.0, floor=f)
-            env.add_edge(nid, f"F{f}_C{r}", length=1.0, width=1.0, door=True)
+            env.add_edge(nid, corridor, length=1.0, width=1.0, door=True)
 
-        # Nurse room (one per floor, connected to central corridor)
+        # Nurse room (one per floor, NOT connected to corridor)
         nurse_nid = f"F{f}_NURSE"
         env.add_node(nid=nurse_nid, ntype="room", length=4.0, area=12.0, floor=f)
-        env.add_edge(nurse_nid, f"F{f}_C1", length=1.0, width=1.0, door=True)
+        # Nurse station connects directly to all rooms
 
-        # Play area
-        play_nid = f"F{f}_PLAY"
-        env.add_node(nid=play_nid, ntype="room", length=6.0, area=24.0, floor=f)
-        env.add_edge(play_nid, f"F{f}_C2", length=1.0, width=1.2, door=True)
+        # Play areas (2 per floor)
+        for p in range(2):
+            play_nid = f"F{f}_PLAY{p}"
+            corridor = f"F{f}_C{2 if p == 0 else 0}"  # PLAY0 → C2, PLAY1 → C0
+            env.add_node(nid=play_nid, ntype="room", length=6.0, area=24.0, floor=f)
+            env.add_edge(play_nid, corridor, length=1.0, width=1.2, door=True)
 
         # Kitchen / service
         kit_nid = f"F{f}_KITCHEN"
         env.add_node(nid=kit_nid, ntype="room", length=4.0, area=10.0, floor=f)
         env.add_edge(kit_nid, f"F{f}_C0", length=1.0, width=1.0, door=True)
 
-        # Special nurse-connection hallways: connect every room on this floor to the nurse station
-        # Nurseries
-        for r in range(3):
-            con_nid = f"F{f}_NCON_NUR{r}"
-            env.add_node(nid=con_nid, ntype="hall", length=3.0, area=6.0, floor=f)
-            env.add_edge(f"F{f}_NUR{r}", con_nid, length=1.0, width=1.0, door=False)
-            env.add_edge(con_nid, nurse_nid, length=1.0, width=1.0, door=False)
+        # Storage room
+        storage_nid = f"F{f}_STORAGE"
+        env.add_node(nid=storage_nid, ntype="room", length=4.0, area=10.0, floor=f)
+        env.add_edge(storage_nid, f"F{f}_C2", length=1.0, width=1.0, door=True)
 
-        # Play area connection
-        con_play = f"F{f}_NCON_PLAY"
-        env.add_node(nid=con_play, ntype="hall", length=3.0, area=6.0, floor=f)
-        env.add_edge(play_nid, con_play, length=1.0, width=1.0, door=False)
-        env.add_edge(con_play, nurse_nid, length=1.0, width=1.0, door=False)
-
-        # Kitchen connection
-        con_kit = f"F{f}_NCON_KIT"
-        env.add_node(nid=con_kit, ntype="hall", length=3.0, area=6.0, floor=f)
-        env.add_edge(kit_nid, con_kit, length=1.0, width=1.0, door=False)
-        env.add_edge(con_kit, nurse_nid, length=1.0, width=1.0, door=False)
+        # Connect nurse station directly to all rooms (but not to corridors)
+        for r in range(6):
+            env.add_edge(nurse_nid, f"F{f}_NUR{r}", length=2.0, width=1.0, door=True)
+        for p in range(2):
+            env.add_edge(nurse_nid, f"F{f}_PLAY{p}", length=2.0, width=1.0, door=True)
+        env.add_edge(nurse_nid, kit_nid, length=2.0, width=1.0, door=True)
+        env.add_edge(nurse_nid, storage_nid, length=2.0, width=1.0, door=True)
 
     # Connect vertical circulation: stairs between floors
     for f in range(FLOORS - 1):
@@ -201,7 +197,7 @@ def build_babycare_layout() -> BuildingFireEnvironment:
         env.spawn_person(f"F{f}_NURSE", age=36, mobility="staff", hp=100.0)
 
         # Few infants and caregivers in nurseries
-        for r in range(3):
+        for r in range(6):
             # caregiver
             env.spawn_person(f"F{f}_NUR{r}", age=28 + r, mobility="adult", hp=100.0)
             # infant (mobility set to 'infant' so environment logic can treat specially)
