@@ -95,7 +95,6 @@ class BuildingFireEnvironment:
             # Skip already inactive agents
             if not getattr(agent, "is_active", True):
                continue
-
         node = self.nodes[agent.node_id]
         hp_loss = 0.0
         exposure_gain = 0.0
@@ -758,7 +757,7 @@ class BuildingFireEnvironment:
             node = self.nodes[nid]
             features = self.get_node_features(node)
             node_features.append(features)
-        
+
         X = np.stack(node_features, axis=0)  # Shape: [N, 10]
         
         # Construct edge_index and edge_attr
