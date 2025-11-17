@@ -45,6 +45,7 @@ class PPOConfig:
     num_ppo_epochs: int = 4                # PPO update epochs per iteration (reduced for speed)
     num_parallel_envs: int = 1             # Number of parallel environments (1=no parallel)
     batch_size: int = 64                   # Minibatch size for updates (RTX 5090 can handle large batches)
+    batch_rollout_size: int = 1            # Number of rollouts to collect before policy update (1=no batching)
     
     # Evaluation configuration
     eval_interval: int = 200               # Evaluate every N iterations (much less frequent for speed)
