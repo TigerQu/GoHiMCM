@@ -2,8 +2,79 @@ import torch
 import torch.nn as nn
 from torch_geometric.nn import GATConv, GraphNorm
 from torch_geometric.data import Data
+from typing import Set
 
 from utils.configs import CONFIGS
+
+
+# ===== POMDP FEATURE MASKING INDICES =====
+# From environment.env.get_node_features():
+# [0:4]   One-hot node type (structural, always visible)
+# [4]     Fire intensity (hazard)
+# [5]     Smoke density (hazard)
+# [6]     Length normalized (structural, always visible)
+# [7]     People count (occupant - should be masked for unseen nodes)
+# [8]     Average HP (occupant - should be masked for unseen nodes)
+# [9]     Agent presence (occupant - should be masked for unseen nodes)
+# [10]    Distance to fire (global hazard, always visible)
+
+OCCUPANT_FEATURE_INDICES = torch.tensor([7, 8, 9], dtype=torch.long)
+HAZARD_FEATURE_INDICES = torch.tensor([4, 5], dtype=torch.long)
+
+
+# ===== POMDP DATA MASKING FUNCTIONS =====
+def build_actor_data(global_data: Data, seen_nodes: Set[int]) -> Data:
+    """
+    Build partial observation data for actor (policy network).
+    
+    The actor receives a partial observation graph where occupant features
+    on unseen nodes are masked to zero. This implements partial observability:
+    agents can only know about people/agents in nodes they've visited.
+    
+    Args:
+        global_data (Data): Full state graph from environment
+        seen_nodes (Set[int]): Node indices the agent has seen (visited or searched)
+        
+    Returns:
+        Data: Masked graph with occupant features zeroed for unseen nodes
+    """
+    x = global_data.x.clone()  # Clone to avoid modifying original
+    N = x.size(0)
+    device = x.device
+    
+    # ===== CHANGE: Mask occupant features for unseen nodes =====
+    # Unseen nodes: people_count, avg_hp, agent_presence → 0
+    # Keeps structural (type, length) and hazard info visible globally
+    for node_idx in range(N):
+        if node_idx not in seen_nodes:
+            # This node is unseen: mask occupant features [7, 8, 9]
+            x[node_idx, 7] = 0.0  # people_count
+            x[node_idx, 8] = 0.0  # avg_hp
+            x[node_idx, 9] = 0.0  # agent_presence
+    
+    # Return masked data with same edge structure
+    return Data(
+        x=x,
+        edge_index=global_data.edge_index,
+        edge_attr=getattr(global_data, 'edge_attr', None)
+    )
+
+
+def build_critic_data(global_data: Data) -> Data:
+    """
+    Build full observation data for critic (value network).
+    
+    The critic receives the complete ground-truth state (privileged information)
+    to improve value estimation without leaking it into the policy.
+    
+    Args:
+        global_data (Data): Full state graph from environment
+        
+    Returns:
+        Data: Unmasked full state graph
+    """
+    # ===== CHANGE: Critic sees full state (no masking) =====
+    return global_data
 
 
 class GAT(nn.Module):
@@ -139,3 +210,38 @@ class GAT(nn.Module):
             global_embedding (Tensor[H]): Mean-pooled global building state
         """
         return torch.mean(node_embeddings, dim=0)  # [H]
+    
+    
+    @staticmethod
+    def process_batch_with_pomdp(
+        global_data: Data,
+        agent_seen_nodes_list: list,
+    ) -> tuple:
+        """
+        Process a batch of agents with POMDP masking for actor and full state for critic.
+        
+        ===== NEW METHOD: POMDP-aware batch processing =====
+        Implements:
+        - Decentralized actor: partial observation (masked occupants)
+        - Centralized critic: full state (privileged information)
+        
+        Args:
+            global_data (Data): Full environment state graph
+            agent_seen_nodes_list (list): List of seen_nodes sets, one per agent
+                                          seen_nodes[j] = Set[int] of node indices agent j has visited
+            
+        Returns:
+            tuple:
+                actor_data_list (list[Data]): Partial observation graphs for each agent
+                critic_data (Data): Full state graph (same for all agents)
+        """
+        actor_data_list = []
+        for seen_nodes in agent_seen_nodes_list:
+            # ===== CHANGE: Build masked actor data for each agent =====
+            actor_data = build_actor_data(global_data, seen_nodes)
+            actor_data_list.append(actor_data)
+        
+        # ===== CHANGE: Build full critic data (same for all agents) =====
+        critic_data = build_critic_data(global_data)
+        
+        return actor_data_list, critic_data

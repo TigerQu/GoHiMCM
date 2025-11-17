@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.data import Data
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Set
 
-from .new_gat import GAT
+from .new_gat import GAT, build_actor_data, build_critic_data
 try:
     from utils.configs import CONFIGS
 except ImportError:
@@ -119,6 +119,65 @@ class Policy(nn.Module):
         action_logits = self.action_head(agent_features)  # [num_agents, max_actions]
         
         return action_logits, node_embeddings
+    
+    
+    def forward_with_pomdp(
+        self,
+        data: Data,
+        agent_node_indices: torch.Tensor,
+        agent_seen_nodes_list: List[Set[int]],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Compute action logits using POMDP masking for partial observability.
+        
+        ===== NEW METHOD: POMDP-aware policy forward pass =====
+        Decentralized actor receives partial observation (masked occupants).
+        Centralized critic receives full state (privileged information).
+        
+        Args:
+            data (Data): Full environment state from env.get_observation()
+            agent_node_indices (Tensor[num_agents]): Current node of each agent
+            agent_seen_nodes_list (List[Set[int]]): Nodes each agent has visited
+                seen_nodes[i] = Set of node indices agent i has seen
+            
+        Returns:
+            action_logits (Tensor[num_agents, max_actions]): Logits for each agent's actions
+            critic_node_embeddings (Tensor[N, 48]): Node embeddings from critic (full state)
+            actor_node_embeddings_list (List[Tensor]): Node embeddings from each agent's actor
+        """
+        # ===== CHANGE: Build actor data (masked) and critic data (full) =====
+        actor_data_list, critic_data = GAT.process_batch_with_pomdp(data, agent_seen_nodes_list)
+        
+        # Process full state through critic
+        critic_node_embeddings = self.gat(critic_data)  # [N, 48]
+        
+        # Process partial observations through actor for each agent
+        actor_node_embeddings_list = []
+        for actor_data in actor_data_list:
+            # ===== CHANGE: Each agent sees masked graph =====
+            actor_embeddings = self.gat(actor_data)  # [N, 48]
+            actor_node_embeddings_list.append(actor_embeddings)
+        
+        # Get action logits from partial observations
+        # (policy uses masked actor embeddings)
+        agent_features = []
+        for i in range(self.num_agents):
+            agent_idx = agent_node_indices[i]
+            # ===== CHANGE: Use actor embeddings (from masked observation) =====
+            actor_emb = actor_node_embeddings_list[i]
+            agent_node_emb = actor_emb[agent_idx]  # [48]
+            
+            # Get global context from full critic state
+            critic_global = self.gat.get_global_embedding(critic_node_embeddings)
+            
+            # Concatenate local actor view with global critic context
+            agent_feat = torch.cat([agent_node_emb, critic_global], dim=-1)  # [96]
+            agent_features.append(agent_feat)
+        
+        agent_features = torch.stack(agent_features)  # [num_agents, 96]
+        action_logits = self.action_head(agent_features)  # [num_agents, max_actions]
+        
+        return action_logits, critic_node_embeddings, actor_node_embeddings_list
     
     
     def select_actions(
@@ -382,6 +441,44 @@ class Value(nn.Module):
             # Global value (pooled state only)
             global_feat = torch.cat([global_embedding, global_embedding], dim=-1)  # [96]
             return self.value_head(global_feat)  # [1]
+    
+    
+    def forward_with_pomdp(
+        self,
+        data: Data,
+        agent_node_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Estimate value using full state (centralized critic with privileged information).
+        
+        ===== NEW METHOD: POMDP-aware value function =====
+        The critic has access to full state (centralized), giving better value estimates
+        without leaking privileged information into the policy.
+        
+        Args:
+            data (Data): Full environment state from env.get_observation()
+            agent_node_indices (Tensor[num_agents]): Current node of each agent
+            
+        Returns:
+            values (Tensor[num_agents]): Value estimates (one per agent)
+        """
+        # ===== CHANGE: Critic always sees full state =====
+        critic_data = build_critic_data(data)  # No masking - privileged information
+        
+        # Process through GAT
+        node_embeddings = self.gat(critic_data)  # [N, 48]
+        global_embedding = self.gat.get_global_embedding(node_embeddings)  # [48]
+        
+        # Get value for each agent
+        values = []
+        for i in range(self.num_agents):
+            agent_idx = agent_node_indices[i]
+            agent_node_emb = node_embeddings[agent_idx]
+            agent_feat = torch.cat([agent_node_emb, global_embedding], dim=-1)  # [96]
+            value = self.value_head(agent_feat)  # [1]
+            values.append(value)
+        
+        return torch.cat(values)  # [num_agents]
     
     
     @staticmethod
