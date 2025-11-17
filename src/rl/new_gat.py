@@ -21,10 +21,6 @@ class GAT(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         
-        # ===== CHANGE 1: Use FEATURE_DIM from environment (was hardcoded 11) =====
-        # Environment exposes FEATURE_DIM = 11 in config
-        # Features: [4 one-hot node type, fire_intensity, smoke_density, length, 
-        #            people_count, avg_hp, agent_here, dist_to_fire]
         in_dim = 11  # Match FEATURE_DIM from environment
         
         # Define the GAT layers with consistent dimensions

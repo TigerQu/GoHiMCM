@@ -84,7 +84,7 @@ class AttentionVisualizer:
         """
         Plot attention weights on building graph.
         
-        ===== CHANGE 17: Create attention visualization =====
+        Create attention visualization
         
         Args:
             env: Environment instance (for graph structure)
@@ -175,7 +175,7 @@ class AttentionVisualizer:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
         
-        print(f"📊 Attention heatmap saved to: {save_path}")
+        print(f" Attention heatmap saved to: {save_path}")
 
 
 class TimeSeriesAnalyzer:
@@ -349,7 +349,7 @@ class TimeSeriesAnalyzer:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
         
-        print(f"📈 Time series plot saved to: {save_path}")
+        print(f" Time series plot saved to: {save_path}")
 
 
 def analyze_trained_model(checkpoint_path: str, scenario: str = "office"):
@@ -363,7 +363,7 @@ def analyze_trained_model(checkpoint_path: str, scenario: str = "office"):
         checkpoint_path: Path to model checkpoint
         scenario: Scenario name
     """
-    print(f"\n🔍 Analyzing model: {checkpoint_path}\n")
+    print(f"\n Analyzing model: {checkpoint_path}\n")
     
     # Load config and create trainer
     config = PPOConfig.get_default(scenario)

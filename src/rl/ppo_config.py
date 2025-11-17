@@ -16,7 +16,7 @@ class PPOConfig:
     """
     Complete PPO configuration for reproducible experiments.
     
-    ===== CHANGE 3: Structured config instead of scattered kwargs =====
+    Structured config instead of scattered kwargs
     Makes hyperparameter experiments systematic and reproducible.
     """
     

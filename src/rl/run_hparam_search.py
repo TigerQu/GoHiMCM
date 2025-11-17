@@ -62,11 +62,11 @@ def run_single_config(config: PPOConfig, results_file: str):
                 final_eval['sweep_complete_rate'],
             ])
         
-        print(f"\n✅ Config complete: return={final_eval['return_mean']:.2f}")
+        print(f"\n Config complete: return={final_eval['return_mean']:.2f}")
         return final_eval
     
     except Exception as e:
-        print(f"\n❌ Config failed: {e}")
+        print(f"\n Config failed: {e}")
         return None
 
 
@@ -110,7 +110,7 @@ def run_hparam_search(scenario: str = "office"):
     for config in configs:
         config.scenario = scenario
     
-    print(f"\n🔍 Starting hyperparameter search for {scenario}")
+    print(f"\n Starting hyperparameter search for {scenario}")
     print(f"   Total configurations: {len(configs)}")
     print(f"   Results will be saved to: {results_file}\n")
     
@@ -130,7 +130,7 @@ def run_hparam_search(scenario: str = "office"):
         best_result = valid_results[best_idx]
         
         print(f"\n{'='*80}")
-        print(f"🏆 BEST CONFIGURATION FOUND:")
+        print(f" BEST CONFIGURATION FOUND:")
         print(f"{'='*80}")
         print(f"   lr_policy: {best_config.lr_policy}")
         print(f"   entropy_coef: {best_config.entropy_coef}")
@@ -145,7 +145,7 @@ def run_hparam_search(scenario: str = "office"):
         # Save best config
         best_config.num_iterations = 200  # Reset for full training
         best_config.save(f"results/best_config_{scenario}.json")
-        print(f"💾 Best config saved to: results/best_config_{scenario}.json")
+        print(f" Best config saved to: results/best_config_{scenario}.json")
 
 
 def run_multi_seed_experiment(config: PPOConfig, num_seeds: int = 5):
@@ -171,7 +171,7 @@ def run_multi_seed_experiment(config: PPOConfig, num_seeds: int = 5):
             'eval_high_risk_redundancy_mean',
         ])
     
-    print(f"\n🎲 Running multi-seed experiment: {config.experiment_name}")
+    print(f"\n Running multi-seed experiment: {config.experiment_name}")
     print(f"   Testing {num_seeds} random seeds\n")
     
     all_returns = []
@@ -198,7 +198,7 @@ def run_multi_seed_experiment(config: PPOConfig, num_seeds: int = 5):
             ])
     
     print(f"\n{'='*60}")
-    print(f"📊 Multi-Seed Results:")
+    print(f" Multi-Seed Results:")
     print(f"   Mean Return: {np.mean(all_returns):.2f}")
     print(f"   Std Return: {np.std(all_returns):.2f}")
     print(f"   Min Return: {np.min(all_returns):.2f}")

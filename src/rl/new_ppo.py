@@ -38,7 +38,7 @@ class Policy(nn.Module):
         self.num_agents = num_agents
         self.max_actions = max_actions
         
-        # Instantiate GAT (now correctly handles Data objects)
+        # Instantiate GAT 
         self.gat = GAT()
         
         # ===== CHANGE 2: Fixed input dimension to match GAT output =====
@@ -97,13 +97,13 @@ class Policy(nn.Module):
             logits, embeddings = policy(obs, agent_indices)
             # Apply action masking, then sample actions
         """
-        # ===== Step 1: Process entire building graph through GAT =====
+        # Process entire building graph through GAT 
         node_embeddings = self.gat(data)  # [N, 48]
         
-        # ===== Step 2: Get global building state =====
+        # Get global building state
         global_embedding = self.gat.get_global_embedding(node_embeddings)  # [48]
         
-        # ===== Step 3: Extract agent-specific features =====
+        # Extract agent-specific features
         # For each agent, get their node's embedding + global context
         agent_features = []
         for i in range(self.num_agents):
