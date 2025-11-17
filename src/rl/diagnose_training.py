@@ -124,7 +124,9 @@ def diagnose_training(scenario: str = "office", num_rollouts: int = 10):
     avg_rescued = np.mean([s['people_rescued'] for s in all_episode_stats])
     avg_found = np.mean([s['people_found'] for s in all_episode_stats])
     avg_swept = np.mean([s['nodes_swept'] for s in all_episode_stats])
-    total_people = all_episode_stats[0].get('total_people', 'unknown')
+    total_people = all_episode_stats[0].get('total_people', 0)
+    if isinstance(total_people, str) or total_people == 0:
+        total_people = 10  # Default estimate
     
     print(f"   People rescued: {avg_rescued:.1f} / {total_people}")
     print(f"   People found: {avg_found:.1f} / {total_people}")
@@ -138,11 +140,14 @@ def diagnose_training(scenario: str = "office", num_rollouts: int = 10):
         print("      2. Time penalty too high")
         print("      3. Not enough training iterations")
         print("      4. Learning rate too low")
-    elif avg_rescued < total_people * 0.3:
+    elif isinstance(total_people, int) and total_people > 0 and avg_rescued < total_people * 0.3:
         print(f"   ⚠️  WARNING: Low rescue rate (<30%)")
         print("   → Model needs more training")
     else:
-        print(f"   ✅ Rescue rate: {avg_rescued/total_people*100:.1f}%")
+        if isinstance(total_people, int) and total_people > 0:
+            print(f"   ✅ Rescue rate: {avg_rescued/total_people*100:.1f}%")
+        else:
+            print(f"   ✅ Rescuing people: {avg_rescued:.1f} per episode")
     
     # 5. Recommendations
     print("\n" + "=" * 70)
@@ -151,11 +156,18 @@ def diagnose_training(scenario: str = "office", num_rollouts: int = 10):
     
     if avg_rescued == 0:
         print("🔧 URGENT FIXES NEEDED:")
-        print("   1. Increase rescue reward: weight_rescue = 50.0 (currently 20.0)")
-        print("   2. Reduce time penalty: weight_time = 0.01 (currently 0.02)")
-        print("   3. Increase training: num_iterations = 10000+ (currently", config.num_iterations, ")")
-        print("   4. Increase learning rate: lr_policy = 1e-3 (currently", config.lr_policy, ")")
-        print("   5. More exploration: entropy_coef = 0.05 (currently", config.entropy_coef, ")")
+        print("   1. Increase rescue reward: weight_rescue = 100.0")
+        print("   2. DRASTICALLY reduce time penalty: weight_time = 0.0001")
+        print("   3. Increase training: num_iterations = 10000+")
+        print("   4. Increase learning rate: lr_policy = 1e-3")
+        print("   5. More exploration: entropy_coef = 0.05")
+    elif np.mean(all_returns) < -50:
+        print("⚠️  CRITICAL ISSUE: Severely negative returns!")
+        print("   TIME PENALTY IS TOO HIGH!")
+        print("   Current time penalty is dominating all other rewards.")
+        print("   ")
+        print("   Quick fix: Set weight_time = 0.001 (or even 0.0001)")
+        print("   Also increase: weight_rescue = 50.0, weight_coverage = 5.0")
     elif np.mean(all_returns) < 0:
         print("⚠️  ISSUES DETECTED:")
         print("   1. Reduce time penalty (negative returns)")

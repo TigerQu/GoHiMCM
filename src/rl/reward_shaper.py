@@ -262,13 +262,14 @@ class RewardShaper:
         """
         if scenario == "office":
             # Standard office: balanced rewards
+            # CRITICAL FIX: HP loss was killing training!
             return cls(
                 scenario="office",
-                weight_coverage=2.0,       # Increased for better exploration
-                weight_rescue=20.0,        # Increased from 10.0 - make rescue more rewarding
-                weight_hp_loss=0.5,        # Increased penalty to encourage faster rescue
-                weight_time=0.02,          # Increased to encourage efficiency
-                weight_redundancy=5.0,     # Increased from 3.0
+                weight_coverage=10.0,      # High for exploration
+                weight_rescue=100.0,       # Very high - make rescue extremely rewarding
+                weight_hp_loss=0.01,       # DRASTICALLY reduced (was 1.0, then 0.5, now 0.01!)
+                weight_time=0.0,           # Removed completely for now
+                weight_redundancy=20.0,    # High redundancy bonus
             )
         
         elif scenario == "daycare":
