@@ -19,6 +19,7 @@ import torch.optim as optim
 import numpy as np
 from typing import List, Dict, Tuple
 import random
+from torch.cuda.amp import autocast, GradScaler
 
 from environment.layouts import (
     build_standard_office_layout,
@@ -52,6 +53,22 @@ class EnhancedPPOTrainer:
         """
         self.config = config
         
+        # ===== GPU Setup for RTX 5090 =====
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        if torch.cuda.is_available():
+            print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+            print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+            # RTX 5090 optimizations
+            torch.backends.cudnn.benchmark = True  # Auto-tune convolution algorithms
+            torch.backends.cuda.matmul.allow_tf32 = True  # Enable TF32 for faster matmul
+            torch.backends.cudnn.allow_tf32 = True
+        else:
+            print("WARNING: CUDA not available, running on CPU")
+        
+        # Mixed precision training scaler for RTX 5090
+        self.use_amp = torch.cuda.is_available()
+        self.scaler = GradScaler() if self.use_amp else None
+        
         # Set random seeds for reproducibility
         self._set_seeds(config.seed)
         
@@ -59,8 +76,8 @@ class EnhancedPPOTrainer:
         self.policy = Policy(
             num_agents=config.num_agents,
             max_actions=config.max_actions
-        )
-        self.value = Value(num_agents=config.num_agents)
+        ).to(self.device)
+        self.value = Value(num_agents=config.num_agents).to(self.device)
         
         # ===== Optimizers =====
         self.policy_optimizer = optim.Adam(
@@ -99,7 +116,7 @@ class EnhancedPPOTrainer:
         # Save config
         config.save(os.path.join(self.logger.exp_dir, "config.json"))
         
-        print(f"🚀 Initialized {config.scenario} trainer")
+        print(f"Initialized {config.scenario} trainer")
         print(f"   Train layouts: {config.num_train_layouts}")
         print(f"   Eval layouts: {config.num_eval_layouts}")
     
@@ -111,6 +128,7 @@ class EnhancedPPOTrainer:
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)  # For multi-GPU
     
     
     def _create_env(self, scenario: str):
@@ -159,11 +177,11 @@ class EnhancedPPOTrainer:
         step = 0
         
         while not done and step < num_steps:
-            # Get agent positions
+            # Get agent positions (create directly on GPU)
             agent_indices = torch.tensor([
                 self.env.get_agent_node_index(i)
                 for i in range(self.config.num_agents)
-            ])
+            ], device=self.device)
             
             # Get valid actions
             valid_actions_list = [
@@ -171,15 +189,15 @@ class EnhancedPPOTrainer:
                 for i in range(self.config.num_agents)
             ]
             
-            # Select actions
+            # Move observation to GPU once
+            obs_gpu = obs.to(self.device) if hasattr(obs, 'to') else obs
+            
+            # Select actions and get value in single inference (reduce overhead)
             with torch.no_grad():
                 actions, log_probs, action_probs = self.policy.select_actions(
-                    obs, agent_indices, valid_actions_list, deterministic
+                    obs_gpu, agent_indices, valid_actions_list, deterministic
                 )
-            
-            # Get value estimate
-            with torch.no_grad():
-                values = self.value(obs, agent_indices)
+                values = self.value(obs_gpu, agent_indices)
             
             # Convert to env format
             action_dict = {}
@@ -200,8 +218,8 @@ class EnhancedPPOTrainer:
             agent_indices_list.append(agent_indices)
             actions_list.append(actions)
             log_probs_list.append(log_probs)
-            rewards_list.append(torch.tensor(reward))
-            dones_list.append(torch.tensor(float(done)))
+            rewards_list.append(torch.tensor(reward, device=self.device))
+            dones_list.append(torch.tensor(float(done), device=self.device))
             values_list.append(values)
             
             obs = obs_next
@@ -211,9 +229,10 @@ class EnhancedPPOTrainer:
         agent_indices = torch.tensor([
             self.env.get_agent_node_index(i)
             for i in range(self.config.num_agents)
-        ])
+        ], device=self.device)
         with torch.no_grad():
-            final_value = self.value(obs, agent_indices)
+            obs_gpu = obs.to(self.device) if hasattr(obs, 'to') else obs
+            final_value = self.value(obs_gpu, agent_indices)
         
         # Get episode summary
         episode_stats = self.reward_shaper.get_episode_summary(self.env)
@@ -299,50 +318,75 @@ class EnhancedPPOTrainer:
                 obs = observations[t]
                 agent_indices = agent_indices_list[t]
                 
-                action_logits, _ = self.policy(obs, agent_indices)
-                action_probs = F.softmax(action_logits, dim=-1)
-                log_probs = torch.log(
-                    action_probs[torch.arange(self.config.num_agents), actions[t]] + 1e-8
-                )
+                # Move observation to GPU
+                obs_gpu = obs.to(self.device) if hasattr(obs, 'to') else obs
                 
-                all_log_probs.append(log_probs)
-                all_action_probs.append(action_probs)
-                
-                value = self.value(obs, agent_indices)
-                all_values.append(value)
+                # Use automatic mixed precision for forward pass
+                with autocast(enabled=self.use_amp):
+                    action_logits, _ = self.policy(obs_gpu, agent_indices)
+                    action_probs = F.softmax(action_logits, dim=-1)
+                    log_probs = torch.log(
+                        action_probs[torch.arange(self.config.num_agents, device=self.device), actions[t]] + 1e-8
+                    )
+                    
+                    all_log_probs.append(log_probs)
+                    all_action_probs.append(action_probs)
+                    
+                    value = self.value(obs_gpu, agent_indices)
+                    all_values.append(value)
             
             new_log_probs = torch.cat(all_log_probs)
             new_action_probs = torch.cat(all_action_probs)
             new_values = torch.cat(all_values)
             old_log_probs_flat = old_log_probs.reshape(-1)
             
-            policy_loss = Policy.policy_loss(
-                advantages, old_log_probs_flat, new_log_probs,
-                clip_epsilon=self.config.clip_epsilon
-            )
+            # Compute losses with mixed precision
+            with autocast(enabled=self.use_amp):
+                policy_loss = Policy.policy_loss(
+                    advantages, old_log_probs_flat, new_log_probs,
+                    clip_epsilon=self.config.clip_epsilon
+                )
+                
+                value_loss = Value.value_loss(new_values, returns)
+                entropy = Policy.entropy_bonus(new_action_probs)
+                
+                loss = (
+                    policy_loss +
+                    self.config.value_loss_coef * value_loss -
+                    self.config.entropy_coef * entropy
+                )
             
-            value_loss = Value.value_loss(new_values, returns)
-            entropy = Policy.entropy_bonus(new_action_probs)
-            
-            loss = (
-                policy_loss +
-                self.config.value_loss_coef * value_loss -
-                self.config.entropy_coef * entropy
-            )
-            
+            # Backward pass with gradient scaling
             self.policy_optimizer.zero_grad()
             self.value_optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                self.policy.parameters(),
-                self.config.max_grad_norm
-            )
-            torch.nn.utils.clip_grad_norm_(
-                self.value.parameters(),
-                self.config.max_grad_norm
-            )
-            self.policy_optimizer.step()
-            self.value_optimizer.step()
+            
+            if self.use_amp:
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(self.policy_optimizer)
+                self.scaler.unscale_(self.value_optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    self.policy.parameters(),
+                    self.config.max_grad_norm
+                )
+                torch.nn.utils.clip_grad_norm_(
+                    self.value.parameters(),
+                    self.config.max_grad_norm
+                )
+                self.scaler.step(self.policy_optimizer)
+                self.scaler.step(self.value_optimizer)
+                self.scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    self.policy.parameters(),
+                    self.config.max_grad_norm
+                )
+                torch.nn.utils.clip_grad_norm_(
+                    self.value.parameters(),
+                    self.config.max_grad_norm
+                )
+                self.policy_optimizer.step()
+                self.value_optimizer.step()
             
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()
@@ -374,20 +418,26 @@ class EnhancedPPOTrainer:
         returns = []
         stats_list = []
         
-        print(f"🔍 Running evaluation ({num_episodes} episodes)...")
+        print(f"Running evaluation ({num_episodes} episodes)...)\n")
         
         for ep in range(num_episodes):
-            # Use eval layout seeds
-            layout_seed = self.eval_layout_seeds[ep % len(self.eval_layout_seeds)]
+            try:
+                # Use eval layout seeds
+                layout_seed = self.eval_layout_seeds[ep % len(self.eval_layout_seeds)]
+                
+                rollout = self.collect_rollout(
+                    num_steps=self.config.steps_per_rollout,
+                    deterministic=True,  # Greedy actions for evaluation
+                    layout_seed=layout_seed
+                )
+                
+                returns.append(rollout['episode_return'])
+                stats_list.append(rollout['episode_stats'])
             
-            rollout = self.collect_rollout(
-                num_steps=self.config.steps_per_rollout,
-                deterministic=True,  # Greedy actions for evaluation
-                layout_seed=layout_seed
-            )
-            
-            returns.append(rollout['episode_return'])
-            stats_list.append(rollout['episode_stats'])
+            except Exception as e:
+                print(f"⚠️  Warning: Evaluation episode {ep} failed: {e}")
+                print("   Continuing with remaining episodes...")
+                continue
         
         # Aggregate statistics
         summary = {
@@ -402,7 +452,7 @@ class EnhancedPPOTrainer:
             'episode_length_mean': np.mean([s['time_step'] for s in stats_list]),
         }
         
-        print(f"✅ Eval complete: return={summary['return_mean']:.2f}±{summary['return_std']:.2f}")
+        print(f"Eval complete: return={summary['return_mean']:.2f}±{summary['return_std']:.2f}")
         
         return summary
     
@@ -422,6 +472,7 @@ class EnhancedPPOTrainer:
             'value_optimizer_state': self.value_optimizer.state_dict(),
             'config': self.config.to_dict(),
             'best_eval_return': self.best_eval_return,
+            'scaler_state': self.scaler.state_dict() if self.scaler else None,
             'extra': extra or {},
         }
         
@@ -436,18 +487,20 @@ class EnhancedPPOTrainer:
         if is_best:
             best_path = os.path.join(self.checkpoint_dir, "best_model.pt")
             torch.save(checkpoint, best_path)
-            print(f"💾 New best model saved: {best_path}")
+            print(f"New best model saved: {best_path}")
     
     
     def load_checkpoint(self, path: str):
         """Load model checkpoint."""
-        checkpoint = torch.load(path, map_location='cpu')
+        checkpoint = torch.load(path, map_location=self.device)
         self.policy.load_state_dict(checkpoint['policy_state'])
         self.value.load_state_dict(checkpoint['value_state'])
         self.policy_optimizer.load_state_dict(checkpoint['policy_optimizer_state'])
         self.value_optimizer.load_state_dict(checkpoint['value_optimizer_state'])
         self.best_eval_return = checkpoint['best_eval_return']
-        print(f"✅ Loaded checkpoint from {path}")
+        if self.scaler and checkpoint.get('scaler_state'):
+            self.scaler.load_state_dict(checkpoint['scaler_state'])
+        print(f"Loaded checkpoint from {path}")
         return checkpoint
     
     
@@ -459,81 +512,104 @@ class EnhancedPPOTrainer:
         Integrates all improvements: logging, eval, checkpointing.
         """
         print(f"\n{'='*60}")
-        print(f"🎯 Starting training: {self.config.experiment_name}")
+        print(f"Starting training: {self.config.experiment_name}")
+        print(f"Total iterations: {self.config.num_iterations}")
         print(f"{'='*60}\n")
         
         for iteration in range(self.config.num_iterations):
-            # Sample random training layout
-            layout_seed = random.choice(self.train_layout_seeds)
-            
-            # Collect rollout
-            rollout = self.collect_rollout(
-                num_steps=self.config.steps_per_rollout,
-                layout_seed=layout_seed
-            )
-            
-            # Compute advantages
-            advantages, returns = self.compute_advantages(
-                rollout['rewards'],
-                rollout['dones'],
-                rollout['values'],
-                rollout['final_value']
-            )
-            
-            # Update policy
-            losses = self.update_policy(
-                rollout['observations'],
-                rollout['agent_indices'],
-                rollout['actions'],
-                rollout['log_probs'],
-                advantages,
-                returns
-            )
-            
-            # Log training metrics
-            if iteration % self.config.log_interval == 0:
-                self.logger.log_iteration(
-                    iteration,
-                    losses,
-                    rollout['episode_stats'],
-                    rollout['episode_return']
+            try:
+                # Sample random training layout
+                layout_seed = random.choice(self.train_layout_seeds)
+                
+                # Collect rollout
+                rollout = self.collect_rollout(
+                    num_steps=self.config.steps_per_rollout,
+                    layout_seed=layout_seed
                 )
                 
-                print(f"Iter {iteration:4d} | "
-                      f"Return: {rollout['episode_return']:7.2f} | "
-                      f"Policy Loss: {losses['policy_loss']:7.4f} | "
-                      f"Rescued: {rollout['episode_stats']['people_rescued']:2d} | "
-                      f"Redundancy: {rollout['episode_stats']['high_risk_redundancy']:.2f}")
-            
-            # Evaluate and checkpoint
-            if (iteration + 1) % self.config.eval_interval == 0:
-                eval_summary = self.evaluate()
-                self.logger.log_eval(iteration, eval_summary)
-                
-                # Check if best model
-                is_best = eval_summary['return_mean'] > self.best_eval_return
-                if is_best:
-                    self.best_eval_return = eval_summary['return_mean']
-                
-                self.save_checkpoint(
-                    iteration,
-                    is_best=is_best,
-                    extra=eval_summary
+                # Compute advantages
+                advantages, returns = self.compute_advantages(
+                    rollout['rewards'],
+                    rollout['dones'],
+                    rollout['values'],
+                    rollout['final_value']
                 )
+                
+                # Update policy
+                losses = self.update_policy(
+                    rollout['observations'],
+                    rollout['agent_indices'],
+                    rollout['actions'],
+                    rollout['log_probs'],
+                    advantages,
+                    returns
+                )
+                
+                # Log training metrics
+                if iteration % self.config.log_interval == 0:
+                    self.logger.log_iteration(
+                        iteration,
+                        losses,
+                        rollout['episode_stats'],
+                        rollout['episode_return']
+                    )
+                    
+                    print(f"Iter {iteration:4d} | "
+                          f"Return: {rollout['episode_return']:7.2f} | "
+                          f"Policy Loss: {losses['policy_loss']:7.4f} | "
+                          f"Rescued: {rollout['episode_stats']['people_rescued']:2d} | "
+                          f"Redundancy: {rollout['episode_stats']['high_risk_redundancy']:.2f}")
+                
+                # Evaluate and checkpoint
+                if (iteration + 1) % self.config.eval_interval == 0:
+                    print(f"\n{'='*60}")
+                    print(f"Evaluation at iteration {iteration + 1}/{self.config.num_iterations}")
+                    print(f"Progress: {(iteration + 1) / self.config.num_iterations * 100:.1f}%")
+                    print(f"{'='*60}")
+                    eval_summary = self.evaluate()
+                    self.logger.log_eval(iteration, eval_summary)
+                    
+                    # Check if best model
+                    is_best = eval_summary['return_mean'] > self.best_eval_return
+                    if is_best:
+                        self.best_eval_return = eval_summary['return_mean']
+                    
+                    self.save_checkpoint(
+                        iteration,
+                        is_best=is_best,
+                        extra=eval_summary
+                    )
+                
+                # Regular checkpoint
+                if (iteration + 1) % self.config.checkpoint_interval == 0:
+                    self.save_checkpoint(iteration)
             
-            # Regular checkpoint
-            if (iteration + 1) % self.config.checkpoint_interval == 0:
-                self.save_checkpoint(iteration)
+            except KeyboardInterrupt:
+                print("\n\n⚠️  Training interrupted by user at iteration", iteration)
+                print("Saving checkpoint before exit...")
+                self.save_checkpoint(iteration, extra={'interrupted': True})
+                print("Checkpoint saved. Exiting.")
+                return
+            
+            except Exception as e:
+                print(f"\n\n❌ Error at iteration {iteration}: {type(e).__name__}: {e}")
+                print("Saving emergency checkpoint...")
+                try:
+                    self.save_checkpoint(iteration, extra={'error': str(e)})
+                    print("Emergency checkpoint saved.")
+                except:
+                    print("Failed to save emergency checkpoint.")
+                raise  # Re-raise the exception for debugging
         
         # Final evaluation
         print("\n" + "="*60)
-        print("🏁 Training complete! Running final evaluation...")
+        print("Training complete! Running final evaluation...")
         print("="*60 + "\n")
         
         final_eval = self.evaluate(num_episodes=50)
         self.logger.log_eval(self.config.num_iterations, final_eval)
         
-        print(f"\n📊 Final Results:")
+        print(f"\nFinal Results:")
         print(f"   Return: {final_eval['return_mean']:.2f} ± {final_eval['return_std']:.2f}")
         print(f"   People Rescued: {final_eval['people_rescued_mean']:.1f}")
         print(f"   High-Risk Redundancy: {final_eval['high_risk_redundancy_mean']:.2%}")

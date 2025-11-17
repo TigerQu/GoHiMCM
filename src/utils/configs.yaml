@@ -1,6 +1,6 @@
 gat:
-  heads: 8
-  dropout: 0.3
+  heads: 16  # Increased for RTX 5090 (was 8)
+  dropout: 0.2  # Slightly reduced for more capacity
   elu_parameter: 1.0
 ppo:
   discount_factor: 0.99
