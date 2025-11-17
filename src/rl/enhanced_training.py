@@ -252,6 +252,146 @@ class EnhancedPPOTrainer:
         }
     
     
+    def collect_batch_rollouts(
+        self,
+        num_rollouts: int,
+        num_steps: int,
+        deterministic: bool = False,
+        layout_seeds: List[int] = None,
+    ) -> Dict:
+        """
+        Collect multiple rollouts and aggregate them into batched data.
+        
+        ===== NEW METHOD: Batch rollout collection =====
+        Collects K complete episodes sequentially and stacks all transitions
+        for efficient batched policy updates.
+        
+        Args:
+            num_rollouts: Number of complete episodes to collect
+            num_steps: Max steps per episode
+            deterministic: If True, use greedy actions
+            layout_seeds: List of seeds for environment randomization
+                         If None, samples randomly
+            
+        Returns:
+            batch: Aggregated data from all rollouts
+                Contains:
+                - observations: List of observations across all episodes
+                - agent_indices: List of agent index tensors
+                - actions: All actions stacked [total_steps, num_agents]
+                - log_probs: Log probabilities [total_steps, num_agents]
+                - rewards: Rewards [total_steps]
+                - dones: Done flags [total_steps]
+                - values: Value estimates [total_steps, num_agents]
+                - advantages: GAE advantages [total_steps]
+                - returns: Returns [total_steps]
+                - episode_returns: List of return per episode
+                - episode_stats: List of stats per episode
+        """
+        # Generate or use provided seeds
+        if layout_seeds is None:
+            layout_seeds = [random.choice(self.train_layout_seeds) for _ in range(num_rollouts)]
+        
+        # Collect all rollouts
+        all_observations = []
+        all_agent_indices = []
+        all_actions = []
+        all_log_probs = []
+        all_rewards = []
+        all_dones = []
+        all_values = []
+        all_final_values = []
+        all_episode_returns = []
+        all_episode_stats = []
+        episode_step_boundaries = [0]  # For tracking episode boundaries
+        
+        for ep in range(num_rollouts):
+            rollout = self.collect_rollout(
+                num_steps=num_steps,
+                deterministic=deterministic,
+                layout_seed=layout_seeds[ep]
+            )
+            
+            # Stack episode data
+            all_observations.extend(rollout['observations'])
+            all_agent_indices.extend(rollout['agent_indices'])
+            all_actions.append(rollout['actions'])
+            all_log_probs.append(rollout['log_probs'])
+            all_rewards.append(rollout['rewards'])
+            all_dones.append(rollout['dones'])
+            all_values.append(rollout['values'])
+            all_final_values.append(rollout['final_value'])
+            all_episode_returns.append(rollout['episode_return'])
+            all_episode_stats.append(rollout['episode_stats'])
+            
+            # Track episode boundaries for advantage computation
+            episode_step_boundaries.append(episode_step_boundaries[-1] + len(rollout['observations']))
+        
+        # Stack all tensors
+        actions_all = torch.cat(all_actions, dim=0)  # [total_steps, num_agents]
+        log_probs_all = torch.cat(all_log_probs, dim=0)  # [total_steps, num_agents]
+        rewards_all = torch.cat(all_rewards, dim=0)  # [total_steps]
+        dones_all = torch.cat(all_dones, dim=0)  # [total_steps]
+        values_all = torch.cat(all_values, dim=0)  # [total_steps, num_agents] or [total_steps*num_agents]
+        
+        # Compute advantages across all episodes
+        # Need to handle each episode separately for GAE
+        all_advantages = []
+        all_returns = []
+        
+        for ep_idx in range(num_rollouts):
+            start_idx = episode_step_boundaries[ep_idx]
+            end_idx = episode_step_boundaries[ep_idx + 1]
+            
+            ep_rewards = rewards_all[start_idx:end_idx]
+            ep_dones = dones_all[start_idx:end_idx]
+            
+            # Get values for this episode
+            T_ep = end_idx - start_idx
+            if values_all.dim() == 2:  # [total_steps, num_agents]
+                ep_values = values_all[start_idx:end_idx].mean(dim=1)  # Average across agents
+            else:  # [total_steps * num_agents]
+                ep_values = values_all[start_idx*self.config.num_agents:(end_idx)*self.config.num_agents]
+                ep_values = ep_values.view(T_ep, self.config.num_agents).mean(dim=1)
+            
+            final_value = all_final_values[ep_idx].mean()
+            
+            # Compute GAE for this episode
+            values_with_bootstrap = torch.cat([ep_values, final_value.unsqueeze(0)])
+            ep_advantages = Policy.gae(
+                ep_rewards, ep_dones, values_with_bootstrap,
+                gamma=self.config.gamma,
+                lambda_=self.config.gae_lambda
+            )
+            ep_returns = ep_advantages + ep_values
+            
+            all_advantages.append(ep_advantages)
+            all_returns.append(ep_returns)
+        
+        advantages_all = torch.cat(all_advantages, dim=0)  # [total_steps]
+        returns_all = torch.cat(all_returns, dim=0)  # [total_steps]
+        
+        # Expand to match agent counts
+        advantages_expanded = advantages_all.unsqueeze(1).expand(-1, self.config.num_agents).reshape(-1)
+        returns_expanded = returns_all.unsqueeze(1).expand(-1, self.config.num_agents).reshape(-1)
+        
+        return {
+            'observations': all_observations,
+            'agent_indices': all_agent_indices,
+            'actions': actions_all,
+            'log_probs': log_probs_all,
+            'rewards': rewards_all,
+            'dones': dones_all,
+            'values': values_all,
+            'advantages': advantages_expanded,
+            'returns': returns_expanded,
+            'episode_returns': all_episode_returns,
+            'episode_stats': all_episode_stats,
+            'num_episodes': num_rollouts,
+            'num_transitions': actions_all.size(0),
+        }
+    
+    
     def _idx_to_action_str(self, action_idx: int, valid_actions: List[str]) -> str:
         """Map action index to string."""
         if action_idx == 0:
@@ -510,55 +650,96 @@ class EnhancedPPOTrainer:
         
         ===== CHANGE 12: Complete training pipeline =====
         Integrates all improvements: logging, eval, checkpointing.
+        
+        ===== CHANGE 13: Batch rollout collection =====
+        Can now collect multiple rollouts before policy updates using batch_rollout_size.
         """
         print(f"\n{'='*60}")
         print(f"Starting training: {self.config.experiment_name}")
         print(f"Total iterations: {self.config.num_iterations}")
+        print(f"Batch rollout size: {self.config.batch_rollout_size}")
         print(f"{'='*60}\n")
         
         for iteration in range(self.config.num_iterations):
             try:
-                # Sample random training layout
-                layout_seed = random.choice(self.train_layout_seeds)
-                
-                # Collect rollout
-                rollout = self.collect_rollout(
-                    num_steps=self.config.steps_per_rollout,
-                    layout_seed=layout_seed
-                )
-                
-                # Compute advantages
-                advantages, returns = self.compute_advantages(
-                    rollout['rewards'],
-                    rollout['dones'],
-                    rollout['values'],
-                    rollout['final_value']
-                )
-                
-                # Update policy
-                losses = self.update_policy(
-                    rollout['observations'],
-                    rollout['agent_indices'],
-                    rollout['actions'],
-                    rollout['log_probs'],
-                    advantages,
-                    returns
-                )
-                
-                # Log training metrics
-                if iteration % self.config.log_interval == 0:
-                    self.logger.log_iteration(
-                        iteration,
-                        losses,
-                        rollout['episode_stats'],
-                        rollout['episode_return']
+                # ===== CHANGE: Collect batch of rollouts =====
+                if self.config.batch_rollout_size > 1:
+                    # Collect multiple rollouts and aggregate
+                    batch = self.collect_batch_rollouts(
+                        num_rollouts=self.config.batch_rollout_size,
+                        num_steps=self.config.steps_per_rollout
                     )
                     
-                    print(f"Iter {iteration:4d} | "
-                          f"Return: {rollout['episode_return']:7.2f} | "
-                          f"Policy Loss: {losses['policy_loss']:7.4f} | "
-                          f"Rescued: {rollout['episode_stats']['people_rescued']:2d} | "
-                          f"Redundancy: {rollout['episode_stats']['high_risk_redundancy']:.2f}")
+                    # Update policy using batched data
+                    losses = self.update_policy(
+                        batch['observations'],
+                        batch['agent_indices'],
+                        batch['actions'],
+                        batch['log_probs'],
+                        batch['advantages'],
+                        batch['returns']
+                    )
+                    
+                    # Log average metrics across batch
+                    avg_return = np.mean(batch['episode_returns'])
+                    avg_stats = {}
+                    for key in batch['episode_stats'][0].keys():
+                        avg_stats[key] = np.mean([s[key] for s in batch['episode_stats']])
+                    
+                    if iteration % self.config.log_interval == 0:
+                        self.logger.log_iteration(
+                            iteration,
+                            losses,
+                            avg_stats,
+                            avg_return
+                        )
+                        
+                        print(f"Iter {iteration:4d} | "
+                              f"Batch Return: {avg_return:7.2f} (n={batch['num_episodes']}) | "
+                              f"Policy Loss: {losses['policy_loss']:7.4f} | "
+                              f"Rescued: {avg_stats['people_rescued']:2.1f} | "
+                              f"Redundancy: {avg_stats['high_risk_redundancy']:.2f}")
+                else:
+                    # Original single rollout per iteration
+                    layout_seed = random.choice(self.train_layout_seeds)
+                    
+                    rollout = self.collect_rollout(
+                        num_steps=self.config.steps_per_rollout,
+                        layout_seed=layout_seed
+                    )
+                    
+                    # Compute advantages
+                    advantages, returns = self.compute_advantages(
+                        rollout['rewards'],
+                        rollout['dones'],
+                        rollout['values'],
+                        rollout['final_value']
+                    )
+                    
+                    # Update policy
+                    losses = self.update_policy(
+                        rollout['observations'],
+                        rollout['agent_indices'],
+                        rollout['actions'],
+                        rollout['log_probs'],
+                        advantages,
+                        returns
+                    )
+                    
+                    # Log training metrics
+                    if iteration % self.config.log_interval == 0:
+                        self.logger.log_iteration(
+                            iteration,
+                            losses,
+                            rollout['episode_stats'],
+                            rollout['episode_return']
+                        )
+                        
+                        print(f"Iter {iteration:4d} | "
+                              f"Return: {rollout['episode_return']:7.2f} | "
+                              f"Policy Loss: {losses['policy_loss']:7.4f} | "
+                              f"Rescued: {rollout['episode_stats']['people_rescued']:2d} | "
+                              f"Redundancy: {rollout['episode_stats']['high_risk_redundancy']:.2f}")
                 
                 # Evaluate and checkpoint
                 if (iteration + 1) % self.config.eval_interval == 0:
