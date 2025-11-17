@@ -264,11 +264,11 @@ class RewardShaper:
             # Standard office: balanced rewards
             return cls(
                 scenario="office",
-                weight_coverage=1.0,
-                weight_rescue=10.0,
-                weight_hp_loss=0.1,
-                weight_time=0.01,
-                weight_redundancy=3.0,
+                weight_coverage=2.0,       # Increased for better exploration
+                weight_rescue=20.0,        # Increased from 10.0 - make rescue more rewarding
+                weight_hp_loss=0.5,        # Increased penalty to encourage faster rescue
+                weight_time=0.02,          # Increased to encourage efficiency
+                weight_redundancy=5.0,     # Increased from 3.0
             )
         
         elif scenario == "daycare":

@@ -30,17 +30,17 @@ class PPOConfig:
     max_actions: int = 15                  # Max action space size
     
     # PPO hyperparameters (optimized for RTX 5090)
-    lr_policy: float = 3e-4                # Policy learning rate
+    lr_policy: float = 5e-4                # Policy learning rate (increased for faster learning)
     lr_value: float = 1e-3                 # Value learning rate
     gamma: float = 0.99                    # Discount factor
     gae_lambda: float = 0.95               # GAE lambda parameter
     clip_epsilon: float = 0.2              # PPO clipping parameter
-    entropy_coef: float = 0.01             # Entropy bonus coefficient
+    entropy_coef: float = 0.02             # Entropy bonus coefficient (increased for exploration)
     value_loss_coef: float = 0.5           # Value loss weight
     max_grad_norm: float = 0.5             # Gradient clipping threshold
     
     # Training configuration (RTX 5090 optimized - larger batches)
-    num_iterations: int = 5000             # Total training iterations (reduced for faster training)
+    num_iterations: int = 8000             # Total training iterations (increased for better learning)
     steps_per_rollout: int = 100           # Max steps per episode (balanced speed/quality)
     num_ppo_epochs: int = 4                # PPO update epochs per iteration (reduced for speed)
     num_parallel_envs: int = 1             # Number of parallel environments (1=no parallel)
@@ -89,10 +89,12 @@ class PPOConfig:
             return cls(
                 scenario="office",
                 experiment_name="office_baseline_rtx5090",
-                num_iterations=5000,
+                num_iterations=8000,
                 steps_per_rollout=100,
                 num_ppo_epochs=4,
                 batch_size=64,
+                lr_policy=5e-4,
+                entropy_coef=0.02,
             )
         
         elif scenario == "daycare":

@@ -418,20 +418,26 @@ class EnhancedPPOTrainer:
         returns = []
         stats_list = []
         
-        print(f"Running evaluation ({num_episodes} episodes)...")
+        print(f"Running evaluation ({num_episodes} episodes)...)\n")
         
         for ep in range(num_episodes):
-            # Use eval layout seeds
-            layout_seed = self.eval_layout_seeds[ep % len(self.eval_layout_seeds)]
+            try:
+                # Use eval layout seeds
+                layout_seed = self.eval_layout_seeds[ep % len(self.eval_layout_seeds)]
+                
+                rollout = self.collect_rollout(
+                    num_steps=self.config.steps_per_rollout,
+                    deterministic=True,  # Greedy actions for evaluation
+                    layout_seed=layout_seed
+                )
+                
+                returns.append(rollout['episode_return'])
+                stats_list.append(rollout['episode_stats'])
             
-            rollout = self.collect_rollout(
-                num_steps=self.config.steps_per_rollout,
-                deterministic=True,  # Greedy actions for evaluation
-                layout_seed=layout_seed
-            )
-            
-            returns.append(rollout['episode_return'])
-            stats_list.append(rollout['episode_stats'])
+            except Exception as e:
+                print(f"⚠️  Warning: Evaluation episode {ep} failed: {e}")
+                print("   Continuing with remaining episodes...")
+                continue
         
         # Aggregate statistics
         summary = {
@@ -507,70 +513,93 @@ class EnhancedPPOTrainer:
         """
         print(f"\n{'='*60}")
         print(f"Starting training: {self.config.experiment_name}")
+        print(f"Total iterations: {self.config.num_iterations}")
         print(f"{'='*60}\n")
         
         for iteration in range(self.config.num_iterations):
-            # Sample random training layout
-            layout_seed = random.choice(self.train_layout_seeds)
-            
-            # Collect rollout
-            rollout = self.collect_rollout(
-                num_steps=self.config.steps_per_rollout,
-                layout_seed=layout_seed
-            )
-            
-            # Compute advantages
-            advantages, returns = self.compute_advantages(
-                rollout['rewards'],
-                rollout['dones'],
-                rollout['values'],
-                rollout['final_value']
-            )
-            
-            # Update policy
-            losses = self.update_policy(
-                rollout['observations'],
-                rollout['agent_indices'],
-                rollout['actions'],
-                rollout['log_probs'],
-                advantages,
-                returns
-            )
-            
-            # Log training metrics
-            if iteration % self.config.log_interval == 0:
-                self.logger.log_iteration(
-                    iteration,
-                    losses,
-                    rollout['episode_stats'],
-                    rollout['episode_return']
+            try:
+                # Sample random training layout
+                layout_seed = random.choice(self.train_layout_seeds)
+                
+                # Collect rollout
+                rollout = self.collect_rollout(
+                    num_steps=self.config.steps_per_rollout,
+                    layout_seed=layout_seed
                 )
                 
-                print(f"Iter {iteration:4d} | "
-                      f"Return: {rollout['episode_return']:7.2f} | "
-                      f"Policy Loss: {losses['policy_loss']:7.4f} | "
-                      f"Rescued: {rollout['episode_stats']['people_rescued']:2d} | "
-                      f"Redundancy: {rollout['episode_stats']['high_risk_redundancy']:.2f}")
-            
-            # Evaluate and checkpoint
-            if (iteration + 1) % self.config.eval_interval == 0:
-                eval_summary = self.evaluate()
-                self.logger.log_eval(iteration, eval_summary)
-                
-                # Check if best model
-                is_best = eval_summary['return_mean'] > self.best_eval_return
-                if is_best:
-                    self.best_eval_return = eval_summary['return_mean']
-                
-                self.save_checkpoint(
-                    iteration,
-                    is_best=is_best,
-                    extra=eval_summary
+                # Compute advantages
+                advantages, returns = self.compute_advantages(
+                    rollout['rewards'],
+                    rollout['dones'],
+                    rollout['values'],
+                    rollout['final_value']
                 )
+                
+                # Update policy
+                losses = self.update_policy(
+                    rollout['observations'],
+                    rollout['agent_indices'],
+                    rollout['actions'],
+                    rollout['log_probs'],
+                    advantages,
+                    returns
+                )
+                
+                # Log training metrics
+                if iteration % self.config.log_interval == 0:
+                    self.logger.log_iteration(
+                        iteration,
+                        losses,
+                        rollout['episode_stats'],
+                        rollout['episode_return']
+                    )
+                    
+                    print(f"Iter {iteration:4d} | "
+                          f"Return: {rollout['episode_return']:7.2f} | "
+                          f"Policy Loss: {losses['policy_loss']:7.4f} | "
+                          f"Rescued: {rollout['episode_stats']['people_rescued']:2d} | "
+                          f"Redundancy: {rollout['episode_stats']['high_risk_redundancy']:.2f}")
+                
+                # Evaluate and checkpoint
+                if (iteration + 1) % self.config.eval_interval == 0:
+                    print(f"\n{'='*60}")
+                    print(f"Evaluation at iteration {iteration + 1}/{self.config.num_iterations}")
+                    print(f"Progress: {(iteration + 1) / self.config.num_iterations * 100:.1f}%")
+                    print(f"{'='*60}")
+                    eval_summary = self.evaluate()
+                    self.logger.log_eval(iteration, eval_summary)
+                    
+                    # Check if best model
+                    is_best = eval_summary['return_mean'] > self.best_eval_return
+                    if is_best:
+                        self.best_eval_return = eval_summary['return_mean']
+                    
+                    self.save_checkpoint(
+                        iteration,
+                        is_best=is_best,
+                        extra=eval_summary
+                    )
+                
+                # Regular checkpoint
+                if (iteration + 1) % self.config.checkpoint_interval == 0:
+                    self.save_checkpoint(iteration)
             
-            # Regular checkpoint
-            if (iteration + 1) % self.config.checkpoint_interval == 0:
-                self.save_checkpoint(iteration)
+            except KeyboardInterrupt:
+                print("\n\n⚠️  Training interrupted by user at iteration", iteration)
+                print("Saving checkpoint before exit...")
+                self.save_checkpoint(iteration, extra={'interrupted': True})
+                print("Checkpoint saved. Exiting.")
+                return
+            
+            except Exception as e:
+                print(f"\n\n❌ Error at iteration {iteration}: {type(e).__name__}: {e}")
+                print("Saving emergency checkpoint...")
+                try:
+                    self.save_checkpoint(iteration, extra={'error': str(e)})
+                    print("Emergency checkpoint saved.")
+                except:
+                    print("Failed to save emergency checkpoint.")
+                raise  # Re-raise the exception for debugging
         
         # Final evaluation
         print("\n" + "="*60)

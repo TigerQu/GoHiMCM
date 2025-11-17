@@ -15,37 +15,43 @@ def create_fast_config(scenario: str = "office") -> PPOConfig:
     """
     Create a fast training config for quick experiments.
     
-    Optimized for speed over sample efficiency:
-    - Fewer iterations (2000 instead of 5000)
-    - Shorter rollouts (50 instead of 100)
-    - Less frequent evaluation (every 500 iterations)
-    - Fewer PPO epochs (2 instead of 4)
+    Optimized for LEARNING while still being reasonably fast:
+    - 3000 iterations (increased from 2000 for better learning)
+    - 80 steps per rollout (increased from 50)
+    - 3 PPO epochs (increased from 2)
     
-    Should complete in ~30-45 minutes on RTX 5090.
+    Should complete in ~1.5-2 hours on RTX 5090 with actual learning.
     """
     config = PPOConfig.get_default(scenario)
     
-    # Fast training overrides
+    # Balanced training settings
     config.experiment_name = f"{scenario}_fast_rtx5090"
-    config.num_iterations = 2000           # Reduced from 5000
-    config.steps_per_rollout = 50          # Reduced from 100
-    config.num_ppo_epochs = 2              # Reduced from 4
+    config.num_iterations = 3000           # Increased from 2000
+    config.steps_per_rollout = 80          # Increased from 50
+    config.num_ppo_epochs = 3              # Increased from 2
+    
+    # Better learning rates for faster convergence
+    config.lr_policy = 5e-4                # Slightly higher
+    config.lr_value = 1e-3
+    config.entropy_coef = 0.02             # More exploration
     
     # Evaluation settings
-    config.eval_interval = 500             # Very infrequent
-    config.num_eval_episodes = 5           # Quick eval
+    config.eval_interval = 300             # Less frequent
+    config.num_eval_episodes = 10          # Reasonable
     
     # Logging
-    config.log_interval = 20               # Log less frequently
-    config.checkpoint_interval = 500       # Save less frequently
+    config.log_interval = 20               # More frequent for monitoring
+    config.checkpoint_interval = 300       # Match eval
     
     print("=" * 60)
-    print("FAST TRAINING MODE")
+    print("FAST TRAINING MODE (Optimized for Learning)")
     print("=" * 60)
     print(f"Total iterations: {config.num_iterations}")
     print(f"Steps per rollout: {config.steps_per_rollout}")
     print(f"PPO epochs: {config.num_ppo_epochs}")
-    print(f"Estimated time: ~30-45 minutes")
+    print(f"Learning rate: {config.lr_policy}")
+    print(f"Entropy coef: {config.entropy_coef}")
+    print(f"Estimated time: ~1.5-2 hours")
     print("=" * 60 + "\n")
     
     return config
