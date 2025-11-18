@@ -317,8 +317,8 @@ class RewardShaper:
         if curriculum_phase == 1:
             return cls(
                 scenario=scenario,
-                weight_coverage=3.0,      # Medium weight - shaping will add bonuses
-                weight_rescue=30.0,       # Main reward for rescuing people
+                weight_coverage=30.0,     # HIGH: Make sweeping the PRIMARY goal
+                weight_rescue=30.0,       # Equal weight to coverage - must sweep AND rescue
                 weight_hp_loss=0.0,       # NO HP penalty - keep it simple!
                 weight_time=0.0,          # NO time penalty - allow thinking time
                 weight_redundancy=0.0,    # NO redundancy yet
@@ -328,8 +328,8 @@ class RewardShaper:
         if curriculum_phase == 2:
             return cls(
                 scenario=scenario,
-                weight_coverage=0.5,
-                weight_rescue=5.0,
+                weight_coverage=5.0,      # Increased from 0.5 - sweep is priority
+                weight_rescue=5.0,        # Equal weight - must balance both
                 weight_hp_loss=0.02,      # Small penalty for HP loss
                 weight_time=0.0,          # Still no time penalty
                 weight_redundancy=0.0,    # Still no redundancy
@@ -339,11 +339,11 @@ class RewardShaper:
         if curriculum_phase == 3:
             return cls(
                 scenario=scenario,
-                weight_coverage=0.5,
-                weight_rescue=5.0,
+                weight_coverage=5.0,      # Increased - sweep is still important
+                weight_rescue=5.0,        # Equal weight
                 weight_hp_loss=0.02,
                 weight_time=0.0,
-                weight_redundancy=1.0,    # Add redundancy bonus
+                weight_redundancy=5.0,    # Increased redundancy bonus (was 1.0)
             )
         
         # Phase 0 (default): Full reward structure
