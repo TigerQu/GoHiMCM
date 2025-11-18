@@ -943,7 +943,7 @@ class EnhancedPPOTrainer:
     
     def load_checkpoint(self, path: str):
         """Load model checkpoint."""
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.policy.load_state_dict(checkpoint['policy_state'])
         self.value.load_state_dict(checkpoint['value_state'])
         self.policy_optimizer.load_state_dict(checkpoint['policy_optimizer_state'])

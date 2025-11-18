@@ -61,6 +61,18 @@ def train_phase2():
     print("[1] Initializing trainer...")
     trainer = EnhancedPPOTrainer(config)
     
+    # Load Phase 1 best model as initialization (transfer learning)
+    print("[1b] Loading Phase 1 best model...")
+    import os
+    import glob
+    phase1_logs = sorted(glob.glob("logs/phase1_simplified_rewards_*/checkpoints/best_model.pt"))
+    if phase1_logs:
+        best_model_path = phase1_logs[-1]  # Most recent
+        print(f"    Loaded from: {best_model_path}")
+        trainer.load_checkpoint(best_model_path)
+    else:
+        print("    WARNING: No Phase 1 checkpoint found, starting from random")
+    
     # Override with Phase 2 reward shaper
     print("[2] Setting up Phase 2 rewards...")
     reward_shaper = RewardShaper.for_scenario(
