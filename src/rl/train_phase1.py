@@ -36,21 +36,23 @@ def train_phase1():
         experiment_name="phase1_simplified_rewards",
         seed=42,
         num_agents=2,
-        lr_policy=5e-4,
-        lr_value=1e-3,
+        lr_policy=3e-4,            # Reduced from 5e-4
+        lr_value=3e-4,             # Reduced from 1e-3 (was too aggressive)
         gamma=0.99,
         gae_lambda=0.95,
-        entropy_coef=0.1,          # MUCH higher entropy to force exploration
-        value_loss_coef=0.5,
+        entropy_coef=0.02,         # Reduced from 0.1 (was too high, suppresses advantages)
+        value_loss_coef=0.25,      # Reduced from 0.5 (critic was too strong)
         num_iterations=500,
         steps_per_rollout=100,
-        num_ppo_epochs=4,
+        num_ppo_epochs=2,          # Reduced from 4 (fewer updates per batch)
         batch_size=64,
         batch_rollout_size=1,
         eval_interval=100,
         num_eval_episodes=5,
         log_interval=10,
         checkpoint_interval=50,
+        clip_epsilon=0.2,          # Keep PPO clipping stable
+        max_grad_norm=0.5,         # Gradient clipping
     )
     
     # Create trainer

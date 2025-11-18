@@ -486,6 +486,49 @@ class EnhancedPPOTrainer:
                        self.config.value_loss_coef * losses['value_loss'] - 
                        self.config.entropy_coef * losses['entropy'])
             print(f"  Combined Loss:   {combined:>10.6f}")
+            
+            # ===== 6 HARD DIAGNOSTIC METRICS =====
+            print(f"\n{'-'*80}")
+            print(f"6 PPO DIAGNOSTIC METRICS (HARD INDICATORS)")
+            print(f"{'-'*80}")
+            
+            # 1. Approximate KL divergence
+            approx_kl = losses.get('approx_kl', 0.0)
+            kl_status = "✓ OK" if 0.001 <= approx_kl <= 0.02 else ("✗ TOO HIGH" if approx_kl > 0.02 else "✗ TOO LOW")
+            print(f"\n  1. Approx KL divergence: {approx_kl:>10.6f}  {kl_status}")
+            print(f"     (Normal range: 0.001-0.02; >0.02=step too large; ≈0 with reward drop=adv/logp bug)")
+            
+            # 2. Clipping fraction
+            clip_frac = losses.get('clip_fraction', 0.0)
+            clip_status = "✓ OK" if 0.1 <= clip_frac <= 0.4 else ("✗ TOO HIGH" if clip_frac > 0.4 else "✗ TOO LOW")
+            print(f"\n  2. Clip fraction:       {clip_frac:>10.4f}  {clip_status}")
+            print(f"     (Normal range: 0.1-0.4; 0=can't learn; 1=completely clipped)")
+            
+            # 3. Entropy
+            entropy = losses.get('entropy', 0.0)
+            entropy_status = "✓ OK" if entropy > 0.1 else "✗ LOW - check entropy_coef"
+            print(f"\n  3. Entropy:             {entropy:>10.6f}  {entropy_status}")
+            print(f"     (Should decrease smoothly; high entropy + reward drop = entropy_coef too large)")
+            
+            # 4. Explained variance
+            explained_var = losses.get('explained_var', 0.0)
+            var_status = "✓ OK" if explained_var > 0.1 else ("✗ CRASH" if explained_var < 0 else "✗ WEAK")
+            print(f"\n  4. Explained variance:  {explained_var:>10.4f}  {var_status}")
+            print(f"     (<0 or ~0 = critic collapsed; fix: lower lr_value, add value_clip, reduce value_loss_coef)")
+            
+            # 5. Advantage distribution
+            adv_mean = losses.get('adv_mean', 0.0)
+            adv_std = losses.get('adv_std', 1.0)
+            adv_status = "✓ OK" if abs(adv_mean) < 0.1 and 0.9 <= adv_std <= 1.1 else "⚠ NOT NORMALIZED"
+            print(f"\n  5. Advantage stats:     mean={adv_mean:>8.4f}, std={adv_std:>8.4f}  {adv_status}")
+            print(f"     (Should be: mean≈0, std≈1 after normalization)")
+            
+            # 6. Old vs new logp
+            old_logp_mean = losses.get('old_logp_mean', 0.0)
+            new_logp_mean = losses.get('new_logp_mean', 0.0)
+            logp_status = "✓ OK" if abs(old_logp_mean - new_logp_mean) < 1.0 else "✗ DIVERGED"
+            print(f"\n  6. LogP sanity check:   old={old_logp_mean:>8.4f}, new={new_logp_mean:>8.4f}  {logp_status}")
+            print(f"     (Shouldn't diverge; if old≈new+KL≠0, check ratio calculation)")
         
         # ===== REWARD METRICS =====
         print(f"\n{'-'*80}")
@@ -620,17 +663,21 @@ class EnhancedPPOTrainer:
         advantages: torch.Tensor,
         returns: torch.Tensor,
     ) -> Dict[str, float]:
-        """Update policy and value networks."""
+        """Update policy and value networks with diagnostic metrics."""
         T = actions.size(0)
         total_policy_loss = 0.0
         total_value_loss = 0.0
         total_entropy = 0.0
+        total_approx_kl = 0.0
+        total_clip_fraction = 0.0
+        total_explained_var = 0.0
         
         # Normalize advantages to stabilize training
         advantages_normalized = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
         # Flatten returns to match dimensions
         returns_flat = returns.reshape(-1)
+        old_log_probs_flat = old_log_probs.reshape(-1)
         
         for epoch in range(self.config.num_ppo_epochs):
             all_log_probs = []
@@ -661,7 +708,31 @@ class EnhancedPPOTrainer:
             new_log_probs = torch.cat(all_log_probs).reshape(-1)
             new_action_probs = torch.cat(all_action_probs)
             new_values = torch.cat(all_values).reshape(-1)
-            old_log_probs_flat = old_log_probs.reshape(-1)
+            
+            # Compute DIAGNOSTIC METRICS (6 hard indicators)
+            # 1. Approximate KL divergence
+            approx_kl = (old_log_probs_flat - new_log_probs).mean().item()
+            
+            # 2. Clipping fraction
+            ratio = torch.exp(new_log_probs - old_log_probs_flat)
+            clipped = torch.abs(ratio - 1.0) > self.config.clip_epsilon
+            clip_fraction = clipped.float().mean().item()
+            
+            # 3. Entropy (from action probs)
+            entropy_val = Policy.entropy_bonus(new_action_probs).item()
+            
+            # 4. Explained variance (critic performance)
+            var_returns = torch.var(returns_flat).item()
+            var_residual = torch.var(returns_flat - new_values).item()
+            explained_var = 1.0 - (var_residual / (var_returns + 1e-8))
+            
+            # 5. Advantage statistics
+            adv_mean = advantages_normalized.mean().item()
+            adv_std = advantages_normalized.std().item()
+            
+            # 6. Old vs new logp statistics (sanity check)
+            old_logp_mean = old_log_probs_flat.mean().item()
+            new_logp_mean = new_log_probs.mean().item()
             
             # Compute losses with mixed precision
             with autocast(enabled=self.use_amp):
@@ -713,12 +784,31 @@ class EnhancedPPOTrainer:
             
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()
-            total_entropy += entropy.item()
+            total_entropy += entropy_val
+            total_approx_kl += approx_kl
+            total_clip_fraction += clip_fraction
+            total_explained_var += explained_var
+        
+        # Compute averages
+        num_epochs = self.config.num_ppo_epochs
+        avg_policy_loss = total_policy_loss / num_epochs
+        avg_value_loss = total_value_loss / num_epochs
+        avg_entropy = total_entropy / num_epochs
+        avg_approx_kl = total_approx_kl / num_epochs
+        avg_clip_fraction = total_clip_fraction / num_epochs
+        avg_explained_var = total_explained_var / num_epochs
         
         return {
-            'policy_loss': total_policy_loss / self.config.num_ppo_epochs,
-            'value_loss': total_value_loss / self.config.num_ppo_epochs,
-            'entropy': total_entropy / self.config.num_ppo_epochs,
+            'policy_loss': avg_policy_loss,
+            'value_loss': avg_value_loss,
+            'entropy': avg_entropy,
+            'approx_kl': avg_approx_kl,
+            'clip_fraction': avg_clip_fraction,
+            'explained_var': avg_explained_var,
+            'adv_mean': adv_mean,
+            'adv_std': adv_std,
+            'old_logp_mean': old_logp_mean,
+            'new_logp_mean': new_logp_mean,
         }
     
     
