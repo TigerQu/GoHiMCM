@@ -30,7 +30,7 @@ from rl.new_ppo import Policy, Value
 from rl.reward_shaper import RewardShaper
 from rl.logging_utils import ExperimentLogger
 from rl.ppo_config import PPOConfig
-from rl.visualization_utils import plot_agent_trajectories
+from rl.final_env_visualizer import plot_agent_trajectories
 
 
 class EnhancedPPOTrainer:
