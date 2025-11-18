@@ -1,31 +1,15 @@
+"""
+End-to-end planner test driver for GreedySweepPlanner.
+
+This script runs the greedy planner on three built-in layouts and prints
+per-step and final statistics. It also saves a sweep visualization PNG for
+each layout using the local `plot_sweep` helper.
+"""
+
 from __future__ import annotations
-
-"""
-End-to-end test for GreedySweepPlanner on three layouts:
-
-  - Standard office
-  - Babycare center (multi-floor, high-risk rooms)
-  - Two-floor warehouse
-
-For each layout, we run one episode with the greedy planner in
-"realistic" information mode (aligned with RL observation space),
-and then print:
-
-  - Final time_step
-  - Nodes swept
-  - People rescued
-  - HP statistics of rescued people (min / max / mean)
-  - Final HP of each agent
-"""
 
 from typing import Callable, Dict, Any
 
-# When running this file directly (e.g. python src/traditional_planner/
-# planner_test.py) the repository's `src` directory may not be on sys.path
-# which causes
-# `from environment.layouts` (and other package imports) to fail with
-# ModuleNotFoundError. Add a small fallback that prepends the repo's src
-# directory to sys.path and retries the imports.
 try:
     from environment.layouts import (
         build_standard_office_layout,
@@ -33,11 +17,10 @@ try:
         build_two_floor_warehouse,
     )
 except Exception:
-    import os
-    import sys
+    # Fallback when running file directly and src/ isn't on sys.path.
+    import os, sys
 
     _this_dir = os.path.dirname(__file__)
-    # src/traditional_planner/.. -> src
     _src_dir = os.path.abspath(os.path.join(_this_dir, ".."))
     if _src_dir not in sys.path:
         sys.path.insert(0, _src_dir)
@@ -52,6 +35,12 @@ from traditional_planner.adapter import EnvAdapter
 from traditional_planner.planner import GreedySweepPlanner
 from traditional_planner.scoring import PlannerConfig
 
+# Use the plotting helper in this package (if present)
+try:
+    from traditional_planner.plot_sweep import plot_sweep_with_risk
+except Exception:
+    plot_sweep_with_risk = None
+
 
 def run_greedy_episode_on_layout(
     layout_name: str,
@@ -61,76 +50,63 @@ def run_greedy_episode_on_layout(
     max_steps: int = 600,
     verbose: bool = True,
 ) -> Dict[str, Any]:
-    """
-    Run one episode of the greedy planner on a given layout.
-
-    Args:
-        layout_name: Name used for printing/logging.
-        build_env_fn: Function that constructs and returns a new env instance.
-        info_mode: "realistic" (RL-aligned) or "oracle" (full-info).
-        seed: Random seed passed to env.reset.
-        max_steps: Hard cap on the number of time steps.
-        verbose: If True, print progress to stdout.
-
-    Returns:
-        final_snapshot: Snapshot dict after the episode terminates.
-    """
-    # 1) Build environment and wrap in adapter
     env = build_env_fn()
     adapter = EnvAdapter(env=env, info_mode=info_mode)
 
     cfg = PlannerConfig()
     planner = GreedySweepPlanner(adapter=adapter, cfg=cfg)
 
-    # 2) Reset environment
     snap = adapter.reset(seed=seed)
-    nodes = snap["nodes"]
-    num_rooms = sum(
-        1 for _, info in nodes.items() if info["type"] == "room"
-    )
+
+    # logging for visualization
+    agent_paths: Dict[int, list[str]] = {aid: [ainfo.get("node")] for aid, ainfo in snap["agents"].items()}
+    node_clear_time: Dict[str, float] = {}
 
     if verbose:
         print("=" * 70)
         print(f"Layout      : {layout_name}")
         print(f"Info mode   : {info_mode}")
         print(f"Seed        : {seed}")
+        num_rooms = sum(1 for _, info in snap["nodes"].items() if info.get("type") == "room")
         print(f"#rooms      : {num_rooms}")
         print(f"max_steps   : {max_steps}")
         print("-" * 70)
 
-    # 3) Main simulation loop
     for t in range(max_steps):
         nodes = snap["nodes"]
-
-        # Frontier = all unswept rooms
-        frontier = [
-            nid
-            for nid, info in nodes.items()
-            if info["type"] == "room" and not info["swept"]
-        ]
+        frontier = [nid for nid, info in nodes.items() if info.get("type") == "room" and not info.get("swept")]
 
         if not frontier:
             if verbose:
                 print(f"\nAll rooms swept at step {t}. Terminating episode.")
             break
 
-        # Plan actions for this step
         actions = planner.plan_step(snap)
 
-        # Apply actions
+        if verbose:
+            print(f"t={t:3d} planned actions: {actions}")
+
         for aid, ainfo in actions.items():
             act_type = ainfo["action"]
-            dest = ainfo.get("dest", None)
-
+            dest = ainfo.get("dest")
             if act_type == "move" and dest is not None:
                 adapter.move(aid, dest)
             elif act_type == "search":
                 adapter.search(aid)
-            # "wait" does nothing
 
-        # Advance environment dynamics
         adapter.step()
         snap = adapter.snapshot()
+
+        # update agent paths
+        for aid, ainfo in snap["agents"].items():
+            node_id = ainfo.get("node")
+            agent_paths.setdefault(aid, []).append(node_id)
+
+        # update clear times
+        current_time = snap["time"]
+        for nid, info in snap["nodes"].items():
+            if info.get("type") == "room" and info.get("swept"):
+                node_clear_time.setdefault(nid, current_time)
 
         if verbose and (t < 5 or t % 20 == 0):
             stats = snap["stats"]
@@ -141,16 +117,9 @@ def run_greedy_episode_on_layout(
                 f"rescued={stats['people_rescued']:3d}"
             )
 
-    # 4) Final statistics
     stats = snap["stats"]
 
-    # Collect rescued people HP from the underlying env
-    rescued_hps = [
-        person.hp
-        for person in env.people.values()
-        if getattr(person, "rescued", False)
-    ]
-
+    rescued_hps = [p.hp for p in env.people.values() if getattr(p, "rescued", False)]
     if rescued_hps:
         min_hp = min(rescued_hps)
         max_hp = max(rescued_hps)
@@ -158,8 +127,7 @@ def run_greedy_episode_on_layout(
     else:
         min_hp = max_hp = mean_hp = 0.0
 
-    # Collect final agent HPs
-    agent_hps = {aid: agent.hp for aid, agent in env.agents.items()}
+    agent_hps = {aid: a.hp for aid, a in env.agents.items()}
 
     if verbose:
         print("\n--- Final stats ---")
@@ -169,33 +137,45 @@ def run_greedy_episode_on_layout(
         print(f"people_rescued   : {stats['people_rescued']}")
         print(f"#rescued_people  : {len(rescued_hps)}")
         print(
-            f"rescued_HP_stats : min={min_hp:.1f}, "
-            f"max={max_hp:.1f}, mean={mean_hp:.1f}"
+            f"rescued_HP_stats : min={min_hp:.1f}, max={max_hp:.1f}, mean={mean_hp:.1f}"
         )
         print("agent_HP         : ", end="")
-        print(", ".join(
-            f"agent{aid}={hp:.1f}"
-            for aid, hp in sorted(agent_hps.items())
-        ))
+        print(", ".join(f"agent{aid}={hp:.1f}" for aid, hp in sorted(agent_hps.items())))
         print()
 
-    # You can also return extra info if needed later (for logging/plots)
-    result = dict(
+    # visualization
+    try:
+        if plot_sweep_with_risk is not None:
+            edges = list(env.G.edges())
+            title = f"{layout_name} greedy sweep (clear-time coloring)"
+            save_path = f"{layout_name}_greedy_sweep.png"
+            plot_sweep_with_risk(
+                node_positions=None,
+                edges=edges,
+                agent_paths=agent_paths,
+                node_clear_time=node_clear_time,
+                risk_at_time=None,
+                title=title,
+                save_path=save_path,
+                env=env,
+                show_people=True,
+            )
+            if verbose:
+                print(f"[INFO] Saved sweep visualization to {save_path}")
+    except Exception as e:
+        if verbose:
+            print(f"[WARN] Failed to create sweep visualization for {layout_name}: {e}")
+
+    return dict(
         layout=layout_name,
-        info_mode=info_mode,
-        seed=seed,
         final_time=snap["time"],
         nodes_swept=stats["nodes_swept"],
         people_found=stats["people_found"],
         people_rescued=stats["people_rescued"],
-        rescued_hps=rescued_hps,
-        agent_hps=agent_hps,
     )
-    return result
 
 
 def main() -> None:
-    # Define the layouts we want to test
     layouts = [
         ("office", build_standard_office_layout),
         ("babycare", build_babycare_layout),
@@ -203,7 +183,6 @@ def main() -> None:
     ]
 
     for name, fn in layouts:
-        # Use realistic mode to align with RL observation space
         run_greedy_episode_on_layout(
             layout_name=name,
             build_env_fn=fn,
