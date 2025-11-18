@@ -1,7 +1,7 @@
 from .occupants import move_civilians as _move_civilians
 from .occupants import _shortest_distance_to_any_exit as _shortest_dist_exit
 
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
 import math, random, heapq
 import numpy as np
 import networkx as nx
@@ -76,6 +76,12 @@ class BuildingFireEnvironment:
         self._last_nodes_swept = 0
         self._last_people_alive = 0
         self._last_people_rescued = 0
+        
+        # Agent trajectory tracking for loop detection and anti-thrash
+        self._agent_trajectories: Dict[int, List[str]] = {}
+        self._agent_last_edges: Dict[int, List[Tuple[str, str]]] = {}
+        self._agent_entered_room: Dict[int, Optional[str]] = {}  # Track if just entered room
+        self._first_visit_nodes: Set[str] = set()  # Track first-visit coverage
         
         # For reset
         self._initial_agent_positions: Dict[int, str] = {}
@@ -383,21 +389,69 @@ class BuildingFireEnvironment:
     
     
     def get_valid_actions(self, agent_id: int) -> List[str]:
-        """Get valid actions for agent (action masking)."""
+        """Get valid actions for agent (action masking with loop detection and anti-thrash)."""
         if agent_id not in self.agents:
             return ["wait"]
         
         agent = self.agents[agent_id]
+        
+        # Check if agent is active
+        if hasattr(agent, 'is_active') and not agent.is_active:
+            return ["wait"]
+        
+        # If searching, must wait
         if agent.searching:
             return ["wait"]
         
         valid_actions = ["search"]
         current = agent.node_id
-        for neighbor in self.G.neighbors(current):
+        
+        # Get trajectory for loop detection
+        if agent_id not in self._agent_trajectories:
+            self._agent_trajectories[agent_id] = []
+        trajectory = self._agent_trajectories[agent_id]
+        
+        # Add movement to all neighbors
+        neighbors = list(self.G.neighbors(current))
+        for neighbor in neighbors:
             valid_actions.append(f"move_{neighbor}")
+        
+        # === LOOP DETECTION DIAGNOSTIC ===
+        # Check for ABA oscillation (agent at A, went to B, now back at A)
+        if len(trajectory) >= 3 and trajectory[-3] == trajectory[-1] != trajectory[-2]:
+            print(f"[LOOP DETECTED] Agent {agent_id} at {trajectory[-1]} (oscillating with {trajectory[-2]})")
+            print(f"  Valid actions: {sorted(valid_actions)}")
+            # Check if there are other moves besides the loop
+            other_moves = [a for a in valid_actions if a.startswith('move_') 
+                          and a not in [f'move_{trajectory[-2]}', f'move_{trajectory[-1]}']]
+            if not other_moves:
+                print(f"  WARNING: No outward moves available! Graph connectivity issue!")
+            else:
+                print(f"  Other moves available: {other_moves}")
+        
+        # === ANTI-THRASH: Room commit ===
+        # If agent just entered a room and can search, mask immediate back-edge for 1 step
+        current_node = self.nodes.get(current)
+        if current_node and current_node.ntype == 'room':
+            # Check if we just entered this room (previous node was different)
+            if len(trajectory) >= 2 and trajectory[-2] != current:
+                # Agent just entered room
+                prev_node = trajectory[-2]
+                # Check if search is valid and room has degree > 1
+                if len(neighbors) > 1:  # Not a dead end
+                    # Mask the back-edge temporarily to encourage commitment
+                    back_move = f"move_{prev_node}"
+                    if back_move in valid_actions:
+                        # Only mask if not in hazard (allow escape)
+                        if not (current_node.on_fire or current_node.smoky):
+                            valid_actions.remove(back_move)
+                            print(f"[ANTI-THRASH] Agent {agent_id} committed to room {current}, masked {back_move}")
+        
+        # Always include wait as an option
         valid_actions.append("wait")
         
-        return valid_actions
+        # Return sorted for stable indexing
+        return sorted(valid_actions)
     
     def get_agent_node_index(self, agent_id: int) -> Optional[int]:
         """Get node index where agent is located."""
@@ -458,7 +512,9 @@ class BuildingFireEnvironment:
         Termination conditions:
         1. All rooms swept (success)
         2. Max steps reached (timeout)
-        3. All people dead (optional early termination)
+        3. Both agents stuck with no valid moves (deadlock)
+        
+        NOTE: People dying does NOT end episode - agents continue to sweep building
         """
         # Success: all rooms swept
         if self.is_sweep_complete():
@@ -468,8 +524,16 @@ class BuildingFireEnvironment:
         if self.time_step >= self.config["max_steps"]:
             return True
         
-        # All people dead (optional)
-        if self.people and all(not p.is_alive for p in self.people.values()):
+        # Both agents stuck (only have 'wait' action)
+        all_stuck = True
+        for agent_id in self.agents.keys():
+            valid = self.get_valid_actions(agent_id)
+            # If agent has any action besides 'wait', they're not stuck
+            if len(valid) > 1 or (len(valid) == 1 and valid[0] != 'wait'):
+                all_stuck = False
+                break
+        
+        if all_stuck:
             return True
         
         return False
@@ -498,6 +562,16 @@ class BuildingFireEnvironment:
         # NEW: Check if agent is active
         if hasattr(agent, "is_active") and not agent.is_active:
             return False
+        
+        # Track trajectory for loop detection
+        if agent_id not in self._agent_trajectories:
+            self._agent_trajectories[agent_id] = []
+        prev_node = agent.node_id
+        self._agent_trajectories[agent_id].append(target_node_id)
+        
+        # Keep only last 10 positions for memory efficiency
+        if len(self._agent_trajectories[agent_id]) > 10:
+            self._agent_trajectories[agent_id] = self._agent_trajectories[agent_id][-10:]
         
         # Move agent
         agent.node_id = target_node_id

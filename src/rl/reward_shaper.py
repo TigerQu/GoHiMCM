@@ -28,22 +28,22 @@ class RewardShaper:
     def __init__(
         self,
         scenario: str = "office",
-        weight_coverage: float = 1.0,
-        weight_rescue: float = 10.0,
-        weight_hp_loss: float = 0.1,
-        weight_time: float = 0.01,
-        weight_redundancy: float = 5.0,
+        weight_coverage: float = 50.0,   # INCREASED 10x - prioritize full coverage
+        weight_rescue: float = 100.0,    # INCREASED 10x - prioritize rescue
+        weight_hp_loss: float = 0.001,   # REDUCED - minimal penalty
+        weight_time: float = 0.0,        # REMOVED - no time pressure
+        weight_redundancy: float = 50.0, # INCREASED 10x - encourage thoroughness
     ):
         """
         Initialize reward shaper with scenario-specific weights.
         
         Args:
             scenario (str): "office", "daycare", or "warehouse"
-            weight_coverage (float): Weight for room sweep rewards
-            weight_rescue (float): Weight for rescue rewards
-            weight_hp_loss (float): Weight for HP loss penalty
-            weight_time (float): Weight for time penalty
-            weight_redundancy (float): Weight for redundancy bonus
+            weight_coverage (float): Weight for room sweep rewards (default 50.0)
+            weight_rescue (float): Weight for rescue rewards (default 100.0)
+            weight_hp_loss (float): Weight for HP loss penalty (default 0.001)
+            weight_time (float): Weight for time penalty (default 0.0 - DISABLED)
+            weight_redundancy (float): Weight for redundancy bonus (default 50.0)
         """
         self.scenario = scenario
         self.w_coverage = weight_coverage

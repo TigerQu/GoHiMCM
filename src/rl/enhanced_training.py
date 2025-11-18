@@ -213,7 +213,18 @@ class EnhancedPPOTrainer:
             
             # Execute
             obs_next, _, done, info = self.env.do_action(action_dict)
-            reward = self.reward_shaper.compute_reward(self.env)
+            
+            # Compute reward (pass actions for ImprovedRewardShaper compatibility)
+            if hasattr(self.reward_shaper, 'compute_reward'):
+                # Check if compute_reward accepts actions parameter
+                import inspect
+                sig = inspect.signature(self.reward_shaper.compute_reward)
+                if 'actions' in sig.parameters:
+                    reward = self.reward_shaper.compute_reward(self.env, action_dict)
+                else:
+                    reward = self.reward_shaper.compute_reward(self.env)
+            else:
+                reward = 0.0
             
             # Store
             observations.append(obs)

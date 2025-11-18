@@ -27,7 +27,7 @@ class PPOConfig:
     
     # Agent configuration
     num_agents: int = 2                    # Number of firefighter agents
-    max_actions: int = 15                  # Max action space size
+    max_actions: int = 15                  # Max action space size (matches Phase 3 checkpoint)
     
     # PPO hyperparameters (optimized for RTX 5090)
     lr_policy: float = 5e-4                # Policy learning rate (increased for faster learning)

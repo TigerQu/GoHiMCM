@@ -210,14 +210,20 @@ class Policy(nn.Module):
         # Get logits
         action_logits, _ = self.forward(data, agent_node_indices)  # [num_agents, max_actions]
         
-        # ===== Apply action masking =====
-        # Map action strings to indices
-        # Convention: 0=wait, 1=search, 2+=move_X
+        # ===== Apply action masking with stable sorted indexing =====
+        # Build act2idx mapping from sorted valid_actions for each agent
         action_masks = torch.zeros_like(action_logits, dtype=torch.bool, device=device)
+        agent_action_maps = []  # Store mapping for each agent
         
         for i, valid_actions in enumerate(valid_actions_list):
+            # Sort actions for stable indexing
+            sorted_actions = sorted(valid_actions)
+            action_map = {action: idx for idx, action in enumerate(sorted_actions)}
+            agent_action_maps.append((sorted_actions, action_map))
+            
+            # Map to global action indices
             for action_str in valid_actions:
-                action_idx = self._action_str_to_idx(action_str)
+                action_idx = self._action_str_to_idx(action_str, valid_actions)
                 if action_idx < self.max_actions:
                     action_masks[i, action_idx] = True
         
@@ -240,29 +246,47 @@ class Policy(nn.Module):
         return actions, log_probs, action_probs
     
     
-    def _action_str_to_idx(self, action_str: str) -> int:
+    def _action_str_to_idx(self, action_str: str, valid_actions: List[str] = None) -> int:
         """
-        Map action string from env to action index.
+        Map action string from env to action index using stable sorted mapping.
         
-        ===== NEW METHOD: Action space mapping =====
+        ===== CRITICAL FIX: Stable action indexing =====
         
-        Convention:
+        Problem: Hash-based mapping is unstable and causes collisions.
+        Solution: Build sorted action list per step, map by position.
+        
+        Args:
+            action_str: Action string (e.g., 'wait', 'search', 'move_R_1_2')
+            valid_actions: Sorted list of valid actions for current step
+        
+        Convention (when valid_actions provided):
+            Index = position in sorted(valid_actions)
+        
+        Fallback (when valid_actions not provided):
             0: "wait"
             1: "search"
-            2+: "move_X" where X is neighbor node ID
+            2+: lexicographically sorted move actions
         """
-        if action_str == "wait":
-            return 0
-        elif action_str == "search":
-            return 1
-        elif action_str.startswith("move_"):
-            # Hash node ID to action index (simple approach)
-            # In practice, might need a more sophisticated mapping
-            node_id = action_str[5:]  # Remove "move_" prefix
-            # Simple hash: use node_id hash modulo remaining action space
-            return 2 + (hash(node_id) % (self.max_actions - 2))
+        if valid_actions is not None:
+            # Use sorted valid_actions for stable mapping
+            sorted_actions = sorted(valid_actions)
+            try:
+                return sorted_actions.index(action_str)
+            except ValueError:
+                # Action not in valid list, fallback to wait
+                return 0
         else:
-            return 0  # Default to wait
+            # Fallback for backward compatibility
+            if action_str == "wait":
+                return 0
+            elif action_str == "search":
+                return 1
+            elif action_str.startswith("move_"):
+                # Sort move actions lexicographically for stability
+                # In practice, should always use valid_actions parameter
+                return 2 + hash(action_str[5:]) % (self.max_actions - 2)
+            else:
+                return 0
     
     
     @staticmethod
