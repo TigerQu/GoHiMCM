@@ -643,7 +643,14 @@ class BuildingFireEnvironment:
                 
                 # Mark people as seen (ground truth updated)
                 for pid in node.people:
-                    self.people[pid].seen = True
+                    person = self.people[pid]
+                    if not person.seen:
+                        person.seen = True
+                        # Count as found when an agent observes the person.
+                        # Cast/get fallback ensures stats dict remains ints.
+                        self.stats["people_found"] = (
+                            int(self.stats.get("people_found", 0)) + 1
+                        )
     
     
     def _compute_fire_distances(self) -> None:

@@ -31,22 +31,56 @@ class EnvAdapter:
 
     The traditional planner only talks to this adapter, not to the raw env.
     That keeps the planning code clean and decoupled from RL-specific APIs.
+
+    There are two information modes:
+
+      - "realistic": only uses observable civilian information
+                     (obs_people_count, obs_avg_hp, dist_to_fire_norm, agent_here),
+                     aligned with the RL observation space.
+
+      - "oracle"   : uses full ground-truth civilian locations (env.people),
+                     acting as a full-information upper-bound baseline.
     """
 
-    def __init__(self, env: Optional[BuildingFireEnvironment] = None) -> None:
+    def __init__(
+        self,
+        env: Optional[BuildingFireEnvironment] = None,
+        info_mode: str = "realistic",
+    ) -> None:
         """
         Initialize the adapter.
 
         Args:
             env: Optional pre-constructed environment. If None, a new
                  BuildingFireEnvironment is created with default config.
+            info_mode: "realistic" (RL-aligned partial info) or "oracle"
+                       (full ground-truth civilians).
         """
         self.env: BuildingFireEnvironment = env or BuildingFireEnvironment()
+        if info_mode not in ("realistic", "oracle"):
+            raise ValueError(f"Invalid info_mode: {info_mode}")
+        self.info_mode: str = info_mode
+
+    # ========= Mode control =========
+
+    def set_mode(self, info_mode: str) -> None:
+        """
+        Change information mode at runtime.
+
+        Args:
+            info_mode: "realistic" or "oracle"
+        """
+        if info_mode not in ("realistic", "oracle"):
+            raise ValueError(f"Invalid info_mode: {info_mode}")
+        self.info_mode = info_mode
 
     # ========= Basic control API =========
 
-    def reset(self, seed: Optional[int] = None,
-              fire_node: Optional[str] = None) -> Dict[str, Any]:
+    def reset(
+        self,
+        seed: Optional[int] = None,
+        fire_node: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Reset the underlying environment and return the first snapshot.
 
@@ -116,11 +150,12 @@ class EnvAdapter:
 
     # ========= Helpers =========
 
-    def _people_per_node(self) -> Dict[str, int]:
+    def _people_per_node_full(self) -> Dict[str, int]:
         """
-        Count how many civilians are physically present at each node.
+        Count how many civilians are physically present at each node (ground truth).
 
-        Uses the ground-truth env.people dict (Person.node_id).
+        This uses env.people[pid].node_id and ignores observability.
+        Only used in 'oracle' information mode.
         """
         counts: Dict[str, int] = {}
         people = getattr(self.env, "people", {})
@@ -132,7 +167,8 @@ class EnvAdapter:
 
         for p in iterable:
             nid = getattr(p, "node_id", None)
-            if nid is None:
+            alive = bool(getattr(p, "is_alive", True))
+            if nid is None or not alive:
                 continue
             counts[nid] = counts.get(nid, 0) + 1
 
@@ -140,21 +176,47 @@ class EnvAdapter:
 
     # ========= Snapshot API =========
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self, info_mode: Optional[str] = None) -> Dict[str, Any]:
         """
         Build a planner-friendly snapshot of the current environment state.
+
+        There are two ways to choose information mode:
+          - Use the adapter's default self.info_mode.
+          - Override per call by passing info_mode="realistic" or "oracle".
+
+        Modes:
+          - realistic:
+              people_count = node.obs_people_count
+          - oracle:
+              people_count = ground-truth count from env.people
+
+        In both modes we also expose:
+          - people_obs  : observable count (obs_people_count)
+          - people_true : ground-truth count (for analysis / debugging)
+          - avg_hp_obs  : average HP of observable civilians [0,1]
+          - dist_fire   : normalized distance to nearest fire [0,1]
+          - agent_here  : True if an agent is currently at this node
 
         Returns:
             {
               "time": int,
               "nodes": {
                   nid: {
-                      "type": str,          # "room" | "hall" | "exit"
+                      "type": str,          # "room" | "hall" | "exit" | ...
                       "swept": bool,        # True if required_sweeps reached
                       "on_fire": bool,
                       "smoky": bool,
                       "intensity": float,   # fire_intensity proxy
-                      "people_count": int,  # ground-truth number of people
+
+                      # Civilian info:
+                      "people_count": int,  # depends on info_mode
+                      "people_obs": int,    # observable count
+                      "people_true": int,   # ground-truth count (if available)
+                      "avg_hp_obs": float,  # average HP of observable civilians [0,1]
+
+                      # Fire-distance and agent presence:
+                      "dist_fire": float,   # normalized distance to nearest fire [0,1]
+                      "agent_here": bool,
                   }
               },
               "agents": {
@@ -177,12 +239,24 @@ class EnvAdapter:
               },
             }
         """
+        # Decide which mode to use for this snapshot
+        mode = info_mode or self.info_mode
+        if mode not in ("realistic", "oracle"):
+            raise ValueError(f"Invalid info_mode: {mode}")
+
+        # Make sure observable fields (obs_people_count, dist_to_fire_norm, etc.)
+        # are up to date. We call get_observation() but ignore its return value.
+        get_obs = getattr(self.env, "get_observation", None)
+        if callable(get_obs):
+            _ = get_obs()
+
         G = self.env.G
         nodes_meta = self.env.nodes        # Dict[str, NodeMeta]
         agents_meta = self.env.agents      # Dict[int, Agent]
         stats_env = getattr(self.env, "stats", {})
 
-        people_per_node = self._people_per_node()
+        # Ground-truth people per node (only used in oracle mode or for logging)
+        people_true_map: Dict[str, int] = self._people_per_node_full()
 
         # ----- nodes -----
         nodes: Dict[str, Dict[str, Any]] = {}
@@ -197,13 +271,39 @@ class EnvAdapter:
             smoky = getattr(node, "smoky", False)
             intensity = getattr(node, "fire_intensity", 1.0 if on_fire else 0.0)
 
+            # Observable civilian info (partial observability)
+            people_obs = int(getattr(node, "obs_people_count", 0))
+            avg_hp_obs = float(getattr(node, "obs_avg_hp", 0.0))
+
+            # Ground-truth civilians at this node (full info)
+            people_true = int(people_true_map.get(nid, 0))
+
+            # Fire distance and agent presence (fully observable)
+            dist_fire = float(getattr(node, "dist_to_fire_norm", 1.0))
+            agent_here = bool(getattr(node, "agent_here", False))
+
+            # Decide which people_count the planner will see
+            if mode == "oracle":
+                people_count = people_true
+            else:  # "realistic"
+                people_count = people_obs
+
             nodes[nid] = {
                 "type": ntype,
                 "swept": bool(swept),
                 "on_fire": bool(on_fire),
                 "smoky": bool(smoky),
                 "intensity": float(intensity),
-                "people_count": int(people_per_node.get(nid, 0)),
+
+                # civilans (mode-dependent + both views exposed)
+                "people_count": int(people_count),
+                "people_obs": people_obs,
+                "people_true": people_true,
+                "avg_hp_obs": avg_hp_obs,
+
+                # fire distance + agent presence
+                "dist_fire": dist_fire,
+                "agent_here": agent_here,
             }
 
         # ----- agents -----
