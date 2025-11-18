@@ -73,6 +73,7 @@ class RewardShaper:
         self.prev_stats = None
         self.prev_people_hp = {}
         self.prev_high_risk_rooms_completed = set()
+        self.prev_agent_distances = {}  # Track agent distances for shaping rewards
         
     
     def reset(self):
@@ -80,6 +81,7 @@ class RewardShaper:
         self.prev_stats = None
         self.prev_people_hp = {}
         self.prev_high_risk_rooms_completed = set()
+        self.prev_agent_distances = {}  # Reset distance tracking
     
     
     def compute_reward(self, env) -> float:
@@ -121,6 +123,9 @@ class RewardShaper:
         
         # 5. Redundancy bonus (high-risk rooms with 2+ sweeps)
         reward += self._redundancy_bonus(env)
+        
+        # 6. Distance shaping (encourage agents to move toward people and unseen nodes)
+        reward += self._distance_shaping_reward(env)
         
         # Update previous state
         self.prev_stats = stats.copy()
@@ -244,6 +249,53 @@ class RewardShaper:
         return bonus
     
     
+    def _distance_shaping_reward(self, env) -> float:
+        """
+        Reward for moving closer to people or unseen nodes.
+        
+        This provides a denser reward signal to guide exploration.
+        - Reward for getting closer to unseen people
+        - Reward for moving toward uncovered rooms
+        """
+        reward = 0.0
+        
+        if self.w_rescue == 0 and self.w_coverage == 0:
+            return 0.0  # Skip if both main rewards are zero
+        
+        try:
+            # Get current agent positions
+            current_distances = {}
+            for agent_id in range(len(env.agents)):
+                agent_pos = env.get_agent_node_index(agent_id)
+                current_distances[agent_id] = agent_pos
+            
+            # Compare with previous positions to reward movement
+            # Reward small movements that get closer to goals
+            if self.prev_agent_distances:
+                for agent_id, prev_pos in self.prev_agent_distances.items():
+                    curr_pos = current_distances.get(agent_id, prev_pos)
+                    
+                    # Reward for moving to a different node (encourage exploration)
+                    if curr_pos != prev_pos:
+                        reward += self.w_coverage * 0.1  # Small bonus for moving
+                        
+                        # Check if new node has unseen people
+                        try:
+                            curr_node = env.nodes[curr_pos]
+                            if hasattr(curr_node, 'people') and curr_node.people:
+                                # Bonus for reaching a node with people
+                                reward += self.w_rescue * 0.2
+                        except:
+                            pass
+            
+            self.prev_agent_distances = current_distances
+        
+        except Exception as e:
+            # Silently skip distance shaping if there's an error
+            pass
+        
+        return reward
+    
     def _store_people_hp(self, people: Dict):
         """Store current HP of all people for next delta computation."""
         self.prev_people_hp = {pid: p.hp for pid, p in people.items()}
@@ -265,8 +317,8 @@ class RewardShaper:
         if curriculum_phase == 1:
             return cls(
                 scenario=scenario,
-                weight_coverage=0.5,      # Small reward for sweeping
-                weight_rescue=5.0,        # Main reward for rescuing people
+                weight_coverage=3.0,      # Medium weight - shaping will add bonuses
+                weight_rescue=30.0,       # Main reward for rescuing people
                 weight_hp_loss=0.0,       # NO HP penalty - keep it simple!
                 weight_time=0.0,          # NO time penalty - allow thinking time
                 weight_redundancy=0.0,    # NO redundancy yet
