@@ -258,3 +258,25 @@ class FinalEnvironmentVisualizer:
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             print(f"  Saved metrics plot: {save_path}")
         plt.close()
+
+
+# Standalone function for enhanced_training.py compatibility
+def plot_agent_trajectories(trainer, max_steps=300, deterministic=True, save_path=None, title="Agent Trajectories"):
+    """
+    Standalone wrapper for FinalEnvironmentVisualizer.plot_agent_trajectories.
+    This is the function that enhanced_training.py imports.
+    """
+    if save_path:
+        save_dir = os.path.dirname(save_path)
+        episode_idx = 0  # Default episode index
+    else:
+        save_dir = None
+        episode_idx = 0
+    
+    return FinalEnvironmentVisualizer.plot_agent_trajectories(
+        trainer=trainer,
+        episode_idx=episode_idx,
+        max_steps=max_steps,
+        deterministic=deterministic,
+        save_dir=save_dir
+    )

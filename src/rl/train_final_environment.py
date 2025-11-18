@@ -84,7 +84,6 @@ def train_final_environment():
         # PPO clipping & stability
         clip_epsilon=0.2,
         max_grad_norm=0.5,
-        value_clip_margin=0.2,
     )
     
     # Create trainer
@@ -142,7 +141,7 @@ def train_final_environment():
         
         # Generate trajectory visualization
         try:
-            traj_dir = os.path.join(trainer.log_dir, "trajectories")
+            traj_dir = os.path.join(trainer.logger.exp_dir, "trajectories")
             traj_data = FinalEnvironmentVisualizer.plot_agent_trajectories(
                 trainer,
                 episode_idx=eval_count[0],
@@ -174,11 +173,11 @@ def train_final_environment():
     print("FINAL ENVIRONMENT TRAINING COMPLETE")
     print("="*80)
     print("\nOutput Files:")
-    print(f"  📁 Main directory: {trainer.log_dir}")
-    print(f"  📊 Best model: {trainer.log_dir}/checkpoints/best_model.pt")
-    print(f"  📈 Metrics CSV: {trainer.log_dir}/metrics.csv")
-    print(f"  🗺️  Trajectories: {trainer.log_dir}/trajectories/")
-    print(f"  📝 Config: {trainer.log_dir}/config.json")
+    print(f"  📁 Main directory: {trainer.logger.exp_dir}")
+    print(f"  📊 Best model: {trainer.checkpoint_dir}/best_model.pt")
+    print(f"  📈 Metrics CSV: {trainer.logger.exp_dir}/metrics.csv")
+    print(f"  🗺️  Trajectories: {trainer.logger.exp_dir}/trajectories/")
+    print(f"  📝 Config: {trainer.logger.exp_dir}/config.json")
     print("\nKey Metrics to Check:")
     print("  - Final return (should be > 50)")
     print("  - Coverage: nodes swept (target: 15+ out of 27 total)")
