@@ -862,7 +862,7 @@ class EnhancedPPOTrainer:
         }
     
     
-    def evaluate(self, num_episodes: int = None) -> Dict[str, float]:
+    def evaluate(self, num_episodes: int = None, iteration: int = 0) -> Dict[str, float]:
         """
         Run evaluation episodes on held-out layouts.
         
@@ -871,6 +871,7 @@ class EnhancedPPOTrainer:
         
         Args:
             num_episodes: Number of eval episodes (default from config)
+            iteration: Current training iteration (for trajectory labeling)
             
         Returns:
             summary: Aggregated evaluation metrics
@@ -919,9 +920,9 @@ class EnhancedPPOTrainer:
         
         # Generate agent trajectory visualization for this evaluation
         try:
-            viz_path = os.path.join(self.logger.exp_dir, f"eval_agent_trajectories_iter{np.random.randint(0,100000)}.png")
+            viz_path = os.path.join(self.logger.exp_dir, f"eval_agent_trajectories_iter{iteration:04d}.png")
             plot_agent_trajectories(self, max_steps=self.config.steps_per_rollout, deterministic=True, save_path=viz_path,
-                                    title=f"Eval Agent Trajectories (mean return {summary['return_mean']:.2f})")
+                                    title=f"Eval Agent Trajectories (Iter {iteration}, Return {summary['return_mean']:.1f})")
         except Exception as e:
             print(f"⚠️  Warning: could not generate agent trajectory visualization: {e}")
 
@@ -1105,7 +1106,7 @@ class EnhancedPPOTrainer:
                     print(f"Evaluation at iteration {iteration + 1}/{self.config.num_iterations}")
                     print(f"Progress: {(iteration + 1) / self.config.num_iterations * 100:.1f}%")
                     print(f"{'='*60}")
-                    eval_summary = self.evaluate()
+                    eval_summary = self.evaluate(iteration=iteration+1)
                     self.logger.log_eval(iteration, eval_summary)
                     
                     # Check if best model
