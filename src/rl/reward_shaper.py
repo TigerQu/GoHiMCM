@@ -250,16 +250,51 @@ class RewardShaper:
     
     
     @classmethod
-    def for_scenario(cls, scenario: str) -> 'RewardShaper':
+    def for_scenario(cls, scenario: str, curriculum_phase: int = 0) -> 'RewardShaper':
         """
         Create reward shaper with scenario-specific weights.
         
         Args:
             scenario (str): "office", "daycare", or "warehouse"
+            curriculum_phase (int): 0=full, 1=simple (no penalties), 2=mild HP, 3=realistic
             
         Returns:
             RewardShaper: Configured reward shaper
         """
+        # Phase 1: Simplified curriculum - ONLY coverage + rescue, NO penalties
+        if curriculum_phase == 1:
+            return cls(
+                scenario=scenario,
+                weight_coverage=0.5,      # Small reward for sweeping
+                weight_rescue=5.0,        # Main reward for rescuing people
+                weight_hp_loss=0.0,       # NO HP penalty - keep it simple!
+                weight_time=0.0,          # NO time penalty - allow thinking time
+                weight_redundancy=0.0,    # NO redundancy yet
+            )
+        
+        # Phase 2: Mild realism - add small HP penalty
+        if curriculum_phase == 2:
+            return cls(
+                scenario=scenario,
+                weight_coverage=0.5,
+                weight_rescue=5.0,
+                weight_hp_loss=0.02,      # Small penalty for HP loss
+                weight_time=0.0,          # Still no time penalty
+                weight_redundancy=0.0,    # Still no redundancy
+            )
+        
+        # Phase 3: Realistic - add redundancy
+        if curriculum_phase == 3:
+            return cls(
+                scenario=scenario,
+                weight_coverage=0.5,
+                weight_rescue=5.0,
+                weight_hp_loss=0.02,
+                weight_time=0.0,
+                weight_redundancy=1.0,    # Add redundancy bonus
+            )
+        
+        # Phase 0 (default): Full reward structure
         if scenario == "office":
             # Standard office: balanced rewards
             # CRITICAL FIX: HP loss was killing training!
