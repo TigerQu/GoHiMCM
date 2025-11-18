@@ -679,6 +679,8 @@ class EnhancedPPOTrainer:
         returns_flat = returns.reshape(-1)
         old_log_probs_flat = old_log_probs.reshape(-1)
         
+        first_epoch_metrics = {}
+        
         for epoch in range(self.config.num_ppo_epochs):
             all_log_probs = []
             all_action_probs = []
@@ -709,30 +711,31 @@ class EnhancedPPOTrainer:
             new_action_probs = torch.cat(all_action_probs)
             new_values = torch.cat(all_values).reshape(-1)
             
-            # Compute DIAGNOSTIC METRICS (6 hard indicators)
-            # 1. Approximate KL divergence
-            approx_kl = (old_log_probs_flat - new_log_probs).mean().item()
-            
-            # 2. Clipping fraction
-            ratio = torch.exp(new_log_probs - old_log_probs_flat)
-            clipped = torch.abs(ratio - 1.0) > self.config.clip_epsilon
-            clip_fraction = clipped.float().mean().item()
-            
-            # 3. Entropy (from action probs)
-            entropy_val = Policy.entropy_bonus(new_action_probs).item()
-            
-            # 4. Explained variance (critic performance)
-            var_returns = torch.var(returns_flat).item()
-            var_residual = torch.var(returns_flat - new_values).item()
-            explained_var = 1.0 - (var_residual / (var_returns + 1e-8))
-            
-            # 5. Advantage statistics
-            adv_mean = advantages_normalized.mean().item()
-            adv_std = advantages_normalized.std().item()
-            
-            # 6. Old vs new logp statistics (sanity check)
-            old_logp_mean = old_log_probs_flat.mean().item()
-            new_logp_mean = new_log_probs.mean().item()
+            # COMPUTE FIRST EPOCH DIAGNOSTICS ONLY (before weights change)
+            if epoch == 0:
+                # 1. Approximate KL divergence
+                first_epoch_metrics['approx_kl'] = (old_log_probs_flat - new_log_probs).mean().item()
+                
+                # 2. Clipping fraction
+                ratio = torch.exp(new_log_probs - old_log_probs_flat)
+                clipped = torch.abs(ratio - 1.0) > self.config.clip_epsilon
+                first_epoch_metrics['clip_fraction'] = clipped.float().mean().item()
+                
+                # 3. Entropy (from action probs)
+                first_epoch_metrics['entropy_val'] = Policy.entropy_bonus(new_action_probs).item()
+                
+                # 4. Explained variance (critic performance)
+                var_returns = torch.var(returns_flat).item()
+                var_residual = torch.var(returns_flat - new_values).item()
+                first_epoch_metrics['explained_var'] = 1.0 - (var_residual / (var_returns + 1e-8))
+                
+                # 5. Advantage statistics
+                first_epoch_metrics['adv_mean'] = advantages_normalized.mean().item()
+                first_epoch_metrics['adv_std'] = advantages_normalized.std().item()
+                
+                # 6. Old vs new logp statistics (sanity check)
+                first_epoch_metrics['old_logp_mean'] = old_log_probs_flat.mean().item()
+                first_epoch_metrics['new_logp_mean'] = new_log_probs.mean().item()
             
             # Compute losses with mixed precision
             with autocast(enabled=self.use_amp):
@@ -784,31 +787,26 @@ class EnhancedPPOTrainer:
             
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()
-            total_entropy += entropy_val
-            total_approx_kl += approx_kl
-            total_clip_fraction += clip_fraction
-            total_explained_var += explained_var
+            total_entropy += entropy.item()
         
         # Compute averages
         num_epochs = self.config.num_ppo_epochs
         avg_policy_loss = total_policy_loss / num_epochs
         avg_value_loss = total_value_loss / num_epochs
         avg_entropy = total_entropy / num_epochs
-        avg_approx_kl = total_approx_kl / num_epochs
-        avg_clip_fraction = total_clip_fraction / num_epochs
-        avg_explained_var = total_explained_var / num_epochs
         
+        # Use first epoch metrics for diagnostics
         return {
             'policy_loss': avg_policy_loss,
             'value_loss': avg_value_loss,
             'entropy': avg_entropy,
-            'approx_kl': avg_approx_kl,
-            'clip_fraction': avg_clip_fraction,
-            'explained_var': avg_explained_var,
-            'adv_mean': adv_mean,
-            'adv_std': adv_std,
-            'old_logp_mean': old_logp_mean,
-            'new_logp_mean': new_logp_mean,
+            'approx_kl': first_epoch_metrics.get('approx_kl', 0.0),
+            'clip_fraction': first_epoch_metrics.get('clip_fraction', 0.0),
+            'explained_var': first_epoch_metrics.get('explained_var', 0.0),
+            'adv_mean': first_epoch_metrics.get('adv_mean', 0.0),
+            'adv_std': first_epoch_metrics.get('adv_std', 1.0),
+            'old_logp_mean': first_epoch_metrics.get('old_logp_mean', 0.0),
+            'new_logp_mean': first_epoch_metrics.get('new_logp_mean', 0.0),
         }
     
     
