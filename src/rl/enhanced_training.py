@@ -30,6 +30,7 @@ from rl.new_ppo import Policy, Value
 from rl.reward_shaper import RewardShaper
 from rl.logging_utils import ExperimentLogger
 from rl.ppo_config import PPOConfig
+from rl.visualization_utils import plot_agent_trajectories
 
 
 class EnhancedPPOTrainer:
@@ -905,6 +906,14 @@ class EnhancedPPOTrainer:
         
         print(f"Eval complete: return={summary['return_mean']:.2f}±{summary['return_std']:.2f}")
         
+        # Generate agent trajectory visualization for this evaluation
+        try:
+            viz_path = os.path.join(self.logger.exp_dir, f"eval_agent_trajectories_iter{np.random.randint(0,100000)}.png")
+            plot_agent_trajectories(self, max_steps=self.config.steps_per_rollout, deterministic=True, save_path=viz_path,
+                                    title=f"Eval Agent Trajectories (mean return {summary['return_mean']:.2f})")
+        except Exception as e:
+            print(f"⚠️  Warning: could not generate agent trajectory visualization: {e}")
+
         return summary
     
     
