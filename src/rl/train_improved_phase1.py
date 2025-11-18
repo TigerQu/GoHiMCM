@@ -127,7 +127,7 @@ def train_improved_phase1(num_agents: int = 2, num_iterations: int = 2000):
         steps_per_rollout=100,
         num_ppo_epochs=4,              # More update epochs
         batch_size=64,
-        batch_rollout_size=4,          # More parallel rollouts
+        batch_rollout_size=1,          # Single rollout per iteration (faster startup)
         
         # Evaluation
         eval_interval=50,

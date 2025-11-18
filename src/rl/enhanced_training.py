@@ -994,6 +994,10 @@ class EnhancedPPOTrainer:
         
         for iteration in range(self.config.num_iterations):
             try:
+                # Show progress for first few iterations
+                if iteration < 5:
+                    print(f"Collecting rollout for iteration {iteration}...")
+                
                 # ===== CHANGE: Collect batch of rollouts =====
                 if self.config.batch_rollout_size > 1:
                     # Collect multiple rollouts and aggregate

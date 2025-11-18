@@ -418,16 +418,18 @@ class BuildingFireEnvironment:
         
         # === LOOP DETECTION DIAGNOSTIC ===
         # Check for ABA oscillation (agent at A, went to B, now back at A)
+        # Note: Diagnostics disabled to reduce console spam during training
         if len(trajectory) >= 3 and trajectory[-3] == trajectory[-1] != trajectory[-2]:
-            print(f"[LOOP DETECTED] Agent {agent_id} at {trajectory[-1]} (oscillating with {trajectory[-2]})")
-            print(f"  Valid actions: {sorted(valid_actions)}")
-            # Check if there are other moves besides the loop
-            other_moves = [a for a in valid_actions if a.startswith('move_') 
-                          and a not in [f'move_{trajectory[-2]}', f'move_{trajectory[-1]}']]
-            if not other_moves:
-                print(f"  WARNING: No outward moves available! Graph connectivity issue!")
-            else:
-                print(f"  Other moves available: {other_moves}")
+            pass  # Loop detected - tracked in metrics but not printed
+            # Uncomment for debugging:
+            # print(f"[LOOP DETECTED] Agent {agent_id} at {trajectory[-1]} (oscillating with {trajectory[-2]})")
+            # print(f"  Valid actions: {sorted(valid_actions)}")
+            # other_moves = [a for a in valid_actions if a.startswith('move_') 
+            #               and a not in [f'move_{trajectory[-2]}', f'move_{trajectory[-1]}']]
+            # if not other_moves:
+            #     print(f"  WARNING: No outward moves available! Graph connectivity issue!")
+            # else:
+            #     print(f"  Other moves available: {other_moves}")
         
         # === ANTI-THRASH: Room commit ===
         # If agent just entered a room and can search, mask immediate back-edge for 1 step
