@@ -172,6 +172,7 @@ class EnhancedPPOTrainer:
         rewards_list = []
         dones_list = []
         values_list = []
+        valid_actions_list_per_step = []  # Store valid actions for each step
         
         done = False
         step = 0
@@ -221,6 +222,7 @@ class EnhancedPPOTrainer:
             rewards_list.append(torch.tensor(reward, device=self.device))
             dones_list.append(torch.tensor(float(done), device=self.device))
             values_list.append(values)
+            valid_actions_list_per_step.append(valid_actions_list)  # Store for later
             
             obs = obs_next
             step += 1
@@ -249,6 +251,7 @@ class EnhancedPPOTrainer:
             'final_value': final_value,
             'episode_stats': episode_stats,
             'episode_return': episode_return,
+            'valid_actions_per_step': valid_actions_list_per_step,  # NEW
         }
     
     
@@ -662,6 +665,7 @@ class EnhancedPPOTrainer:
         old_log_probs: torch.Tensor,
         advantages: torch.Tensor,
         returns: torch.Tensor,
+        valid_actions_per_step: List[List[List[str]]] = None,  # NEW: Valid actions for masking
     ) -> Dict[str, float]:
         """Update policy and value networks with diagnostic metrics."""
         T = actions.size(0)
@@ -696,7 +700,27 @@ class EnhancedPPOTrainer:
                 # Use automatic mixed precision for forward pass
                 with autocast(enabled=self.use_amp):
                     action_logits, _ = self.policy(obs_gpu, agent_indices)
-                    action_probs = F.softmax(action_logits, dim=-1)
+                    
+                    # CRITICAL FIX: Apply same masking as during action selection!
+                    if valid_actions_per_step is not None and t < len(valid_actions_per_step):
+                        valid_actions_list = valid_actions_per_step[t]
+                        
+                        # Create action masks
+                        action_masks = torch.zeros_like(action_logits, dtype=torch.bool, device=self.device)
+                        for i, valid_actions in enumerate(valid_actions_list):
+                            for action_str in valid_actions:
+                                action_idx = self.policy._action_str_to_idx(action_str)
+                                if action_idx < self.policy.max_actions:
+                                    action_masks[i, action_idx] = True
+                        
+                        # Apply masking BEFORE softmax (same as select_actions)
+                        masked_logits = action_logits.clone()
+                        masked_logits[~action_masks] = float('-inf')
+                        action_probs = F.softmax(masked_logits, dim=-1)
+                    else:
+                        # Fallback if no valid actions provided (shouldn't happen)
+                        action_probs = F.softmax(action_logits, dim=-1)
+                    
                     log_probs = torch.log(
                         action_probs[torch.arange(self.config.num_agents, device=self.device), actions[t]] + 1e-8
                     )
@@ -744,7 +768,23 @@ class EnhancedPPOTrainer:
                     clip_epsilon=self.config.clip_epsilon
                 )
                 
-                value_loss = Value.value_loss(new_values, returns_flat)
+                # VALUE CLIPPING: Prevent critic from changing too fast
+                # Clip new values to be close to old value predictions
+                value_clip_margin = 0.2
+                old_values_for_clip = torch.cat([
+                    self.value(obs.to(self.device) if hasattr(obs, 'to') else obs, 
+                               agent_indices_list[t]).detach()
+                    for t, obs in enumerate(observations)
+                ]).reshape(-1)
+                
+                values_clipped = old_values_for_clip + torch.clamp(
+                    new_values - old_values_for_clip, 
+                    -value_clip_margin, 
+                    value_clip_margin
+                )
+                
+                # Use clipped values for MSE loss
+                value_loss = Value.value_loss(values_clipped, returns_flat)
                 entropy = Policy.entropy_bonus(new_action_probs)
                 
                 loss = (
@@ -948,7 +988,8 @@ class EnhancedPPOTrainer:
                         batch['actions'],
                         batch['log_probs'],
                         batch['advantages'],
-                        batch['returns']
+                        batch['returns'],
+                        batch.get('valid_actions_per_step', None)  # Pass valid actions
                     )
                     
                     # Log average metrics across batch
@@ -1010,7 +1051,8 @@ class EnhancedPPOTrainer:
                         rollout['actions'],
                         rollout['log_probs'],
                         advantages,
-                        returns
+                        returns,
+                        rollout.get('valid_actions_per_step', None)  # Pass valid actions
                     )
                     
                     # Log training metrics
