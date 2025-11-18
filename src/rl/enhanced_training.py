@@ -1027,27 +1027,14 @@ class EnhancedPPOTrainer:
                             avg_return
                         )
                         
-                        print(f"Iter {iteration:4d} | "
-                              f"Batch Return: {avg_return:7.2f} (n={batch['num_episodes']}) | "
-                              f"Policy Loss: {losses['policy_loss']:7.4f} | "
-                              f"Rescued: {avg_stats['people_rescued']:2.1f} | "
-                              f"Redundancy: {avg_stats['high_risk_redundancy']:.2f}")
-                        
-                        # ===== DETAILED DIAGNOSTICS FOR FIRST ROLLOUT IN BATCH =====
-                        first_rollout = {
-                            'actions': batch['actions'][:batch['actions'].size(0)//batch['num_episodes']],
-                            'rewards': batch['rewards'][:batch['rewards'].size(0)//batch['num_episodes']],
-                            'values': batch['values'][:batch['values'].size(0)//batch['num_episodes']],
-                            'episode_return': batch['episode_returns'][0],
-                            'episode_stats': batch['episode_stats'][0],
-                        }
-                        self.print_iteration_metrics(
-                            iteration,
-                            first_rollout,
-                            batch=batch,
-                            losses=losses,
-                            advantages=batch['advantages'][:batch['advantages'].size(0)//batch['num_episodes']]
-                        )
+                        # Simple progress print (detailed metrics in CSV)
+                        coverage = avg_stats.get('nodes_swept', 0)
+                        rescued = avg_stats.get('people_rescued', 0)
+                        loops = avg_stats.get('loop_detections', 0)
+                        p_loss = losses['policy_loss']
+                        v_loss = losses['value_loss']
+                        print(f"{iteration:5d} | {avg_return:7.1f} | {coverage:8.1f} | {rescued:7.1f} | "
+                              f"P_loss:{p_loss:6.3f} V_loss:{v_loss:6.3f}")
                 else:
                     # Original single rollout per iteration
                     layout_seed = random.choice(self.train_layout_seeds)
@@ -1085,20 +1072,14 @@ class EnhancedPPOTrainer:
                             rollout['episode_return']
                         )
                         
-                        print(f"Iter {iteration:4d} | "
-                              f"Return: {rollout['episode_return']:7.2f} | "
-                              f"Policy Loss: {losses['policy_loss']:7.4f} | "
-                              f"Rescued: {rollout['episode_stats']['people_rescued']:2d} | "
-                              f"Redundancy: {rollout['episode_stats']['high_risk_redundancy']:.2f}")
-                        
-                        # ===== DETAILED DIAGNOSTICS =====
-                        self.print_iteration_metrics(
-                            iteration,
-                            rollout,
-                            batch=None,
-                            losses=losses,
-                            advantages=advantages
-                        )
+                        # Simple progress print (detailed metrics in CSV)
+                        coverage = rollout['episode_stats'].get('nodes_swept', 0)
+                        rescued = rollout['episode_stats'].get('people_rescued', 0)
+                        loops = rollout['episode_stats'].get('loop_detections', 0)
+                        p_loss = losses['policy_loss']
+                        v_loss = losses['value_loss']
+                        print(f"{iteration:5d} | {rollout['episode_return']:7.1f} | {coverage:8d} | {rescued:7d} | "
+                              f"P_loss:{p_loss:6.3f} V_loss:{v_loss:6.3f}")
                 
                 # Evaluate and checkpoint
                 if (iteration + 1) % self.config.eval_interval == 0:

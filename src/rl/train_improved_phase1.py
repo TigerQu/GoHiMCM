@@ -86,38 +86,29 @@ class ImprovedPPOTrainer(EnhancedPPOTrainer):
         return self.reward_shaper.compute_reward(env, actions)
 
 
-def train_improved_phase1():
-    """Train Phase 1 with all improvements."""
+def train_improved_phase1(num_agents: int = 2, num_iterations: int = 2000):
+    """
+    Train Phase 1 with all improvements.
+    
+    Args:
+        num_agents: Number of agents (default 2, can test 1-4)
+        num_iterations: Training iterations (default 2000)
+    """
     
     print("="*80)
-    print("IMPROVED PHASE 1 TRAINING: ANTI-LOOP EXPLORATION")
+    print(f"IMPROVED PHASE 1 TRAINING: {num_agents} AGENTS")
     print("="*80)
-    print("\n🎯 Training Objectives:")
-    print("  1. Learn systematic exploration (no loops)")
-    print("  2. Achieve 90%+ coverage of building")
-    print("  3. Establish robust movement patterns")
-    print("\n🔧 Improvements Enabled:")
-    print("  ✓ Loop detection diagnostics")
-    print("  ✓ Stable action indexing (sorted valid_actions)")
-    print("  ✓ First-visit coverage bonus (+100 reward)")
-    print("  ✓ Edge backtrack penalty (-10 per revisit)")
-    print("  ✓ Potential-based shaping (toward unswept)")
-    print("  ✓ WAIT penalty (-0.1 per wait action)")
-    print("  ✓ Room commit anti-thrash")
-    print("  ✓ Epsilon-greedy exploration (20% random)")
-    print("  ✓ High entropy coefficient (0.1)")
-    print("\n📊 Environment:")
-    print("  - Scenario: office (simplified 11-node layout)")
-    print("  - Agents: 2")
-    print("  - Focus: Coverage only (no rescue yet)")
+    print("\n🎯 Improvements: Loop detection | First-visit bonus | Backtrack penalty")
+    print("               Potential shaping | High exploration (ε=0.2, H=0.1)")
+    print(f"\n📊 Environment: office (11 nodes) | {num_agents} agents | {num_iterations} iterations")
     print("="*80 + "\n")
     
     # Configuration with EXPLORATION EMPHASIS
     config = PPOConfig(
         scenario="office",
-        experiment_name="improved_phase1_antiloop",
+        experiment_name=f"improved_phase1_{num_agents}agents",
         seed=42,
-        num_agents=2,
+        num_agents=num_agents,
         
         # === EXPLORATION SETTINGS (INCREASED) ===
         entropy_coef=0.1,              # HIGH (was 0.01) - encourage random actions
@@ -132,7 +123,7 @@ def train_improved_phase1():
         max_grad_norm=0.5,
         
         # Training parameters
-        num_iterations=2000,           # Extended training for thorough learning
+        num_iterations=num_iterations,  # Extended training for thorough learning
         steps_per_rollout=100,
         num_ppo_epochs=4,              # More update epochs
         batch_size=64,
@@ -141,7 +132,7 @@ def train_improved_phase1():
         # Evaluation
         eval_interval=50,
         num_eval_episodes=5,
-        log_interval=10,
+        log_interval=100,              # Reduce console spam (was 10)
         checkpoint_interval=50,
     )
     
@@ -155,9 +146,9 @@ def train_improved_phase1():
     
     print("\n[2] Starting training...\n")
     print("="*80)
-    print("TRAINING PROGRESS")
+    print("TRAINING PROGRESS (detailed metrics saved to CSV)")
     print("="*80)
-    print("Iter | Return  | Coverage | First | Loops | Entropy | Notes")
+    print("Iter  | Return  | Coverage | Rescued | P_loss  V_loss")
     print("-"*80)
     
     # Train
@@ -283,11 +274,21 @@ def train_improved_phase1():
         
         print("\n" + "="*80)
         
+        return {
+            'num_agents': config.num_agents,
+            'avg_return': np.mean(test_results['returns']),
+            'avg_coverage': np.mean(test_results['coverage']),
+            'avg_coverage_pct': avg_coverage_pct,
+            'avg_loops': avg_loops,
+            'success': avg_coverage_pct >= 80 and avg_loops < 5,
+        }
+        
     except KeyboardInterrupt:
         print("\n\n⚠️  Training interrupted by user")
         print("Saving checkpoint...")
         trainer.save_checkpoint(f"{trainer.logger.log_dir}/checkpoints/interrupted.pt")
         print("Checkpoint saved!")
+        return None
     
     except Exception as e:
         print(f"\n\n❌ Training failed with error: {e}")
@@ -296,5 +297,80 @@ def train_improved_phase1():
         raise
 
 
+def compare_agent_counts(agent_counts=[1, 2, 3, 4], iterations_per_config=1000):
+    """
+    Compare performance across different agent counts.
+    
+    Args:
+        agent_counts: List of agent counts to test
+        iterations_per_config: Training iterations for each config
+    """
+    print("\n" + "="*80)
+    print("🔬 MULTI-AGENT COMPARISON STUDY")
+    print("="*80)
+    print(f"Testing agent counts: {agent_counts}")
+    print(f"Iterations per config: {iterations_per_config}")
+    print("="*80 + "\n")
+    
+    results = []
+    
+    for num_agents in agent_counts:
+        print(f"\n{'='*80}")
+        print(f"Testing with {num_agents} agent{'s' if num_agents > 1 else ''}")
+        print(f"{'='*80}\n")
+        
+        result = train_improved_phase1(num_agents=num_agents, num_iterations=iterations_per_config)
+        
+        if result:
+            results.append(result)
+        
+        print(f"\n✓ Completed {num_agents} agent{'s' if num_agents > 1 else ''}\n")
+    
+    # Summary comparison
+    print("\n" + "="*80)
+    print("📊 COMPARISON SUMMARY")
+    print("="*80)
+    print(f"{'Agents':<8} | {'Return':<10} | {'Coverage':<12} | {'Loops':<8} | {'Status'}")
+    print("-"*80)
+    
+    for r in results:
+        status = "✅ PASS" if r['success'] else "⚠️ PARTIAL"
+        print(f"{r['num_agents']:<8} | {r['avg_return']:<10.1f} | "
+              f"{r['avg_coverage']:.1f}/11 ({r['avg_coverage_pct']:.0f}%) | "
+              f"{r['avg_loops']:<8.1f} | {status}")
+    
+    # Best configuration
+    if results:
+        best = max(results, key=lambda x: x['avg_coverage_pct'])
+        print("\n" + "="*80)
+        print(f"🏆 BEST CONFIGURATION: {best['num_agents']} agents")
+        print(f"   Coverage: {best['avg_coverage_pct']:.1f}%")
+        print(f"   Return: {best['avg_return']:.1f}")
+        print(f"   Loops: {best['avg_loops']:.1f}")
+        print("="*80 + "\n")
+
+
 if __name__ == "__main__":
-    train_improved_phase1()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train improved Phase 1 policy')
+    parser.add_argument('--agents', type=int, default=2, help='Number of agents (default: 2)')
+    parser.add_argument('--iterations', type=int, default=2000, help='Training iterations (default: 2000)')
+    parser.add_argument('--compare', action='store_true', help='Compare different agent counts')
+    parser.add_argument('--compare-agents', type=int, nargs='+', default=[1, 2, 3, 4],
+                       help='Agent counts to compare (default: 1 2 3 4)')
+    parser.add_argument('--compare-iterations', type=int, default=1000,
+                       help='Iterations per config when comparing (default: 1000)')
+    
+    args = parser.parse_args()
+    
+    if args.compare:
+        # Run comparison study
+        compare_agent_counts(
+            agent_counts=args.compare_agents,
+            iterations_per_config=args.compare_iterations
+        )
+    else:
+        # Single training run
+        train_improved_phase1(num_agents=args.agents, num_iterations=args.iterations)
+
