@@ -67,11 +67,15 @@ def train_phase2():
         scenario="office",
         curriculum_phase=2
     )
+    # CRITICAL: Reduce HP penalty from 0.02 to 0.002 to avoid overwhelming rescue signal
+    # 0.02 was causing net negative returns (return ~-5), 0.002 gives ~0.2 penalty per timestep
+    # vs rescue reward of 5.0, which allows learning to continue
+    reward_shaper.w_hp_loss = 0.002
     trainer.reward_shaper = reward_shaper
     
     print(f"    - coverage: {reward_shaper.w_coverage}")
     print(f"    - rescue: {reward_shaper.w_rescue}")
-    print(f"    - hp_loss: {reward_shaper.w_hp_loss}")
+    print(f"    - hp_loss: {reward_shaper.w_hp_loss} (REDUCED for stability)")
     print(f"    - time: {reward_shaper.w_time}")
     print(f"    - redundancy: {reward_shaper.w_redundancy}")
     
