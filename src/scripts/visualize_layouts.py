@@ -65,8 +65,8 @@ def compute_positions_by_floor(env):
 
     # Layout parameters
     floor_gap = 20.0  # much larger for babycare vertical separation
-    hall_x_gap = 8.0  # much larger for better horizontal spacing
-    hall_y_gap = 7.0  # much larger for room separation
+    hall_x_gap = 8.0
+    hall_y_gap = 7.0
 
     # Regex patterns
     wh_hall_re = re.compile(r"^H_(?P<r>\d+)_(?P<c>\d+)$")  # Single floor warehouse: H_{r}_{c}

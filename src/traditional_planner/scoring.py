@@ -27,9 +27,9 @@ class PlannerConfig:
     """
 
     # Distance-risk scoring weights
-    alpha: float = 1.0   # travel distance penalty
+    alpha: float = 0.2   # travel distance penalty
     beta: float = 2.0    # risk "reward" (note the minus sign in score)
-    gamma: float = 0.3   # congestion penalty
+    gamma: float = 0.1   # congestion penalty
 
     # Risk feature weights
     w_intensity: float = 0.5
@@ -139,7 +139,7 @@ def compute_score(
     else:
         dist_val = float(dist_hops)
 
-    eps = 1e-3 * (hash(room_id) % 1000)
+    eps = 0
 
     score = (
         cfg.alpha * dist_val

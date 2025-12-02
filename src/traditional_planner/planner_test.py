@@ -147,7 +147,16 @@ def run_greedy_episode_on_layout(
     try:
         if plot_sweep_with_risk is not None:
             edges = list(env.G.edges())
-            title = f"{layout_name} greedy sweep (clear-time coloring)"
+            # Build rich title with episode stats
+            num_swept = stats["nodes_swept"]
+            num_people_found = stats["people_found"]
+            num_people_rescued = stats["people_rescued"]
+            total_time = snap["time"]
+            total_people = len(env.people)
+            title = (f"{layout_name.upper()} Sweep Trajectory\n"
+                     f"Time: {total_time} | Swept: {num_swept} | "
+                     f"Found: {num_people_found} | "
+                     f"Rescued: {num_people_rescued}/{total_people}")
             save_path = f"{layout_name}_greedy_sweep.png"
             plot_sweep_with_risk(
                 node_positions=None,
@@ -164,7 +173,7 @@ def run_greedy_episode_on_layout(
                 print(f"[INFO] Saved sweep visualization to {save_path}")
     except Exception as e:
         if verbose:
-            print(f"[WARN] Failed to create sweep visualization for {layout_name}: {e}")
+            print(f"[WARN] Failed to create sweep visualization: {e}")
 
     return dict(
         layout=layout_name,

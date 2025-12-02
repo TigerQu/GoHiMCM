@@ -1,0 +1,36 @@
+{
+  "timestamp": "2025-11-18 15:55:40",
+  "best_office": {
+    "layout": "office",
+    "alpha": 0.15,
+    "beta": 4.0,
+    "gamma": 0.1,
+    "avg_efficiency": 0.2619,
+    "avg_rescued": 4.0,
+    "avg_time": 15.3
+  },
+  "best_babycare": {
+    "layout": "babycare",
+    "alpha": 0.15,
+    "beta": 2.0,
+    "gamma": 0.2,
+    "avg_efficiency": 0.5779,
+    "avg_rescued": 37.0,
+    "avg_time": 64.0
+  },
+  "best_warehouse": {
+    "layout": "warehouse",
+    "alpha": 0.2,
+    "beta": 2.0,
+    "gamma": 0.1,
+    "avg_efficiency": 0.0931,
+    "avg_rescued": 4.67,
+    "avg_time": 50.0
+  },
+  "best_unified": {
+    "alpha": 0.15,
+    "beta": 6.0,
+    "gamma": 0.1,
+    "score": 1.0307
+  }
+}
