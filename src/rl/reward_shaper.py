@@ -28,22 +28,22 @@ class RewardShaper:
     def __init__(
         self,
         scenario: str = "office",
-        weight_coverage: float = 1.0,
-        weight_rescue: float = 10.0,
-        weight_hp_loss: float = 0.1,
-        weight_time: float = 0.01,
-        weight_redundancy: float = 5.0,
+        weight_coverage: float = 50.0,   # INCREASED 10x - prioritize full coverage
+        weight_rescue: float = 100.0,    # INCREASED 10x - prioritize rescue
+        weight_hp_loss: float = 0.001,   # REDUCED - minimal penalty
+        weight_time: float = 0.0,        # REMOVED - no time pressure
+        weight_redundancy: float = 50.0, # INCREASED 10x - encourage thoroughness
     ):
         """
         Initialize reward shaper with scenario-specific weights.
         
         Args:
             scenario (str): "office", "daycare", or "warehouse"
-            weight_coverage (float): Weight for room sweep rewards
-            weight_rescue (float): Weight for rescue rewards
-            weight_hp_loss (float): Weight for HP loss penalty
-            weight_time (float): Weight for time penalty
-            weight_redundancy (float): Weight for redundancy bonus
+            weight_coverage (float): Weight for room sweep rewards (default 50.0)
+            weight_rescue (float): Weight for rescue rewards (default 100.0)
+            weight_hp_loss (float): Weight for HP loss penalty (default 0.001)
+            weight_time (float): Weight for time penalty (default 0.0 - DISABLED)
+            weight_redundancy (float): Weight for redundancy bonus (default 50.0)
         """
         self.scenario = scenario
         self.w_coverage = weight_coverage
@@ -73,6 +73,7 @@ class RewardShaper:
         self.prev_stats = None
         self.prev_people_hp = {}
         self.prev_high_risk_rooms_completed = set()
+        self.prev_agent_distances = {}  # Track agent distances for shaping rewards
         
     
     def reset(self):
@@ -80,6 +81,7 @@ class RewardShaper:
         self.prev_stats = None
         self.prev_people_hp = {}
         self.prev_high_risk_rooms_completed = set()
+        self.prev_agent_distances = {}  # Reset distance tracking
     
     
     def compute_reward(self, env) -> float:
@@ -121,6 +123,9 @@ class RewardShaper:
         
         # 5. Redundancy bonus (high-risk rooms with 2+ sweeps)
         reward += self._redundancy_bonus(env)
+        
+        # 6. Distance shaping (encourage agents to move toward people and unseen nodes)
+        reward += self._distance_shaping_reward(env)
         
         # Update previous state
         self.prev_stats = stats.copy()
@@ -244,22 +249,104 @@ class RewardShaper:
         return bonus
     
     
+    def _distance_shaping_reward(self, env) -> float:
+        """
+        Reward for moving closer to people or unseen nodes.
+        
+        This provides a denser reward signal to guide exploration.
+        - Reward for getting closer to unseen people
+        - Reward for moving toward uncovered rooms
+        """
+        reward = 0.0
+        
+        if self.w_rescue == 0 and self.w_coverage == 0:
+            return 0.0  # Skip if both main rewards are zero
+        
+        try:
+            # Get current agent positions
+            current_distances = {}
+            for agent_id in range(len(env.agents)):
+                agent_pos = env.get_agent_node_index(agent_id)
+                current_distances[agent_id] = agent_pos
+            
+            # Compare with previous positions to reward movement
+            # Reward small movements that get closer to goals
+            if self.prev_agent_distances:
+                for agent_id, prev_pos in self.prev_agent_distances.items():
+                    curr_pos = current_distances.get(agent_id, prev_pos)
+                    
+                    # Reward for moving to a different node (encourage exploration)
+                    if curr_pos != prev_pos:
+                        reward += self.w_coverage * 0.1  # Small bonus for moving
+                        
+                        # Check if new node has unseen people
+                        try:
+                            curr_node = env.nodes[curr_pos]
+                            if hasattr(curr_node, 'people') and curr_node.people:
+                                # Bonus for reaching a node with people
+                                reward += self.w_rescue * 0.2
+                        except:
+                            pass
+            
+            self.prev_agent_distances = current_distances
+        
+        except Exception as e:
+            # Silently skip distance shaping if there's an error
+            pass
+        
+        return reward
+    
     def _store_people_hp(self, people: Dict):
         """Store current HP of all people for next delta computation."""
         self.prev_people_hp = {pid: p.hp for pid, p in people.items()}
     
     
     @classmethod
-    def for_scenario(cls, scenario: str) -> 'RewardShaper':
+    def for_scenario(cls, scenario: str, curriculum_phase: int = 0) -> 'RewardShaper':
         """
         Create reward shaper with scenario-specific weights.
         
         Args:
             scenario (str): "office", "daycare", or "warehouse"
+            curriculum_phase (int): 0=full, 1=simple (no penalties), 2=mild HP, 3=realistic
             
         Returns:
             RewardShaper: Configured reward shaper
         """
+        # Phase 1: Simplified curriculum - ONLY coverage + rescue, NO penalties
+        if curriculum_phase == 1:
+            return cls(
+                scenario=scenario,
+                weight_coverage=30.0,     # HIGH: Make sweeping the PRIMARY goal
+                weight_rescue=30.0,       # Equal weight to coverage - must sweep AND rescue
+                weight_hp_loss=0.0,       # NO HP penalty - keep it simple!
+                weight_time=0.0,          # NO time penalty - allow thinking time
+                weight_redundancy=0.0,    # NO redundancy yet
+            )
+        
+        # Phase 2: Mild realism - add small HP penalty
+        if curriculum_phase == 2:
+            return cls(
+                scenario=scenario,
+                weight_coverage=5.0,      # Increased from 0.5 - sweep is priority
+                weight_rescue=5.0,        # Equal weight - must balance both
+                weight_hp_loss=0.02,      # Small penalty for HP loss
+                weight_time=0.0,          # Still no time penalty
+                weight_redundancy=0.0,    # Still no redundancy
+            )
+        
+        # Phase 3: Realistic - add redundancy
+        if curriculum_phase == 3:
+            return cls(
+                scenario=scenario,
+                weight_coverage=5.0,      # Increased - sweep is still important
+                weight_rescue=5.0,        # Equal weight
+                weight_hp_loss=0.02,
+                weight_time=0.0,
+                weight_redundancy=5.0,    # Increased redundancy bonus (was 1.0)
+            )
+        
+        # Phase 0 (default): Full reward structure
         if scenario == "office":
             # Standard office: balanced rewards
             # CRITICAL FIX: HP loss was killing training!

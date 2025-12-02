@@ -21,7 +21,6 @@ from typing import Dict, List, Tuple
 
 from rl.new_gat import GAT
 from rl.new_ppo import Policy, Value
-from rl.enhanced_training import EnhancedPPOTrainer
 from rl.ppo_config import PPOConfig
 
 
@@ -188,7 +187,7 @@ class TimeSeriesAnalyzer:
     
     @staticmethod
     def run_diagnostic_episode(
-        trainer: EnhancedPPOTrainer,
+        trainer,
         max_steps: int = 200,
         deterministic: bool = True
     ) -> Dict[str, List]:
@@ -365,7 +364,8 @@ def analyze_trained_model(checkpoint_path: str, scenario: str = "office"):
     """
     print(f"\n Analyzing model: {checkpoint_path}\n")
     
-    # Load config and create trainer
+    # Load config and create trainer (local import to avoid circulars)
+    from rl.enhanced_training import EnhancedPPOTrainer
     config = PPOConfig.get_default(scenario)
     trainer = EnhancedPPOTrainer(config)
     trainer.load_checkpoint(checkpoint_path)

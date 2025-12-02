@@ -30,6 +30,7 @@ from rl.new_ppo import Policy, Value
 from rl.reward_shaper import RewardShaper
 from rl.logging_utils import ExperimentLogger
 from rl.ppo_config import PPOConfig
+from rl.final_env_visualizer import plot_agent_trajectories
 
 
 class EnhancedPPOTrainer:
@@ -172,6 +173,7 @@ class EnhancedPPOTrainer:
         rewards_list = []
         dones_list = []
         values_list = []
+        valid_actions_list_per_step = []  # Store valid actions for each step
         
         done = False
         step = 0
@@ -211,7 +213,18 @@ class EnhancedPPOTrainer:
             
             # Execute
             obs_next, _, done, info = self.env.do_action(action_dict)
-            reward = self.reward_shaper.compute_reward(self.env)
+            
+            # Compute reward (pass actions for ImprovedRewardShaper compatibility)
+            if hasattr(self.reward_shaper, 'compute_reward'):
+                # Check if compute_reward accepts actions parameter
+                import inspect
+                sig = inspect.signature(self.reward_shaper.compute_reward)
+                if 'actions' in sig.parameters:
+                    reward = self.reward_shaper.compute_reward(self.env, action_dict)
+                else:
+                    reward = self.reward_shaper.compute_reward(self.env)
+            else:
+                reward = 0.0
             
             # Store
             observations.append(obs)
@@ -221,6 +234,7 @@ class EnhancedPPOTrainer:
             rewards_list.append(torch.tensor(reward, device=self.device))
             dones_list.append(torch.tensor(float(done), device=self.device))
             values_list.append(values)
+            valid_actions_list_per_step.append(valid_actions_list)  # Store for later
             
             obs = obs_next
             step += 1
@@ -249,6 +263,7 @@ class EnhancedPPOTrainer:
             'final_value': final_value,
             'episode_stats': episode_stats,
             'episode_return': episode_return,
+            'valid_actions_per_step': valid_actions_list_per_step,  # NEW
         }
     
     
@@ -405,6 +420,212 @@ class EnhancedPPOTrainer:
             return "wait"
     
     
+    def print_iteration_metrics(
+        self,
+        iteration: int,
+        rollout: Dict,
+        batch: Dict = None,
+        losses: Dict = None,
+        advantages: torch.Tensor = None,
+    ):
+        """
+        ===== NEW METHOD: Comprehensive iteration diagnostics =====
+        Prints detailed metrics including:
+        - Agent actions and positions
+        - Value loss and policy loss
+        - Agent state information
+        - Episode statistics
+        - Advantage distribution
+        """
+        print(f"\n{'='*80}")
+        print(f"ITERATION {iteration} - DETAILED DIAGNOSTICS")
+        print(f"{'='*80}")
+        
+        # ===== AGENT ACTIONS =====
+        print(f"\n{'-'*80}")
+        print(f"AGENT ACTIONS")
+        print(f"{'-'*80}")
+        
+        actions = rollout['actions']  # [T, num_agents]
+        for agent_id in range(self.config.num_agents):
+            action_indices = actions[:, agent_id].cpu().numpy()
+            
+            # Get valid actions for first step (proxy for available actions)
+            valid_actions_list = [self.env.get_valid_actions(agent_id) for _ in range(len(action_indices))]
+            
+            # Convert indices to action strings
+            action_strings = []
+            for t, action_idx in enumerate(action_indices[:min(10, len(action_indices))]):
+                try:
+                    action_str = self._idx_to_action_str(int(action_idx), valid_actions_list[0])
+                    action_strings.append(action_str)
+                except:
+                    action_strings.append(f"idx_{int(action_idx)}")
+            
+            action_counts = {}
+            for action_str in action_strings:
+                action_counts[action_str] = action_counts.get(action_str, 0) + 1
+            
+            print(f"\n  Agent {agent_id}:")
+            print(f"    Total steps: {len(action_indices)}")
+            print(f"    First 10 actions: {' → '.join(action_strings)}")
+            print(f"    Action distribution: {action_counts}")
+            print(f"    Unique actions: {len(set(action_strings))}")
+        
+        # ===== AGENT STATE =====
+        print(f"\n{'-'*80}")
+        print(f"AGENT STATE")
+        print(f"{'-'*80}")
+        
+        for agent_id in range(self.config.num_agents):
+            node_idx = self.env.get_agent_node_index(agent_id)
+            node_name = list(self.env.node_to_idx.keys())[node_idx] if hasattr(self.env, 'node_to_idx') else f"Node_{node_idx}"
+            
+            # Get agent position history
+            print(f"\n  Agent {agent_id}:")
+            print(f"    Current position: {node_name} (node_idx={node_idx})")
+            print(f"    Valid actions: {self.env.get_valid_actions(agent_id)}")
+        
+        # ===== LOSS METRICS =====
+        print(f"\n{'-'*80}")
+        print(f"LOSS METRICS")
+        print(f"{'-'*80}")
+        
+        if losses:
+            print(f"\n  Policy Loss:     {losses['policy_loss']:>10.6f}")
+            print(f"  Value Loss:      {losses['value_loss']:>10.6f}")
+            print(f"  Entropy Bonus:   {losses['entropy']:>10.6f}")
+            
+            # Combined loss
+            combined = (losses['policy_loss'] + 
+                       self.config.value_loss_coef * losses['value_loss'] - 
+                       self.config.entropy_coef * losses['entropy'])
+            print(f"  Combined Loss:   {combined:>10.6f}")
+            
+            # ===== 6 HARD DIAGNOSTIC METRICS =====
+            print(f"\n{'-'*80}")
+            print(f"6 PPO DIAGNOSTIC METRICS (HARD INDICATORS)")
+            print(f"{'-'*80}")
+            
+            # 1. Approximate KL divergence
+            approx_kl = losses.get('approx_kl', 0.0)
+            kl_status = "✓ OK" if 0.001 <= approx_kl <= 0.02 else ("✗ TOO HIGH" if approx_kl > 0.02 else "✗ TOO LOW")
+            print(f"\n  1. Approx KL divergence: {approx_kl:>10.6f}  {kl_status}")
+            print(f"     (Normal range: 0.001-0.02; >0.02=step too large; ≈0 with reward drop=adv/logp bug)")
+            
+            # 2. Clipping fraction
+            clip_frac = losses.get('clip_fraction', 0.0)
+            clip_status = "✓ OK" if 0.1 <= clip_frac <= 0.4 else ("✗ TOO HIGH" if clip_frac > 0.4 else "✗ TOO LOW")
+            print(f"\n  2. Clip fraction:       {clip_frac:>10.4f}  {clip_status}")
+            print(f"     (Normal range: 0.1-0.4; 0=can't learn; 1=completely clipped)")
+            
+            # 3. Entropy
+            entropy = losses.get('entropy', 0.0)
+            entropy_status = "✓ OK" if entropy > 0.1 else "✗ LOW - check entropy_coef"
+            print(f"\n  3. Entropy:             {entropy:>10.6f}  {entropy_status}")
+            print(f"     (Should decrease smoothly; high entropy + reward drop = entropy_coef too large)")
+            
+            # 4. Explained variance
+            explained_var = losses.get('explained_var', 0.0)
+            var_status = "✓ OK" if explained_var > 0.1 else ("✗ CRASH" if explained_var < 0 else "✗ WEAK")
+            print(f"\n  4. Explained variance:  {explained_var:>10.4f}  {var_status}")
+            print(f"     (<0 or ~0 = critic collapsed; fix: lower lr_value, add value_clip, reduce value_loss_coef)")
+            
+            # 5. Advantage distribution
+            adv_mean = losses.get('adv_mean', 0.0)
+            adv_std = losses.get('adv_std', 1.0)
+            adv_status = "✓ OK" if abs(adv_mean) < 0.1 and 0.9 <= adv_std <= 1.1 else "⚠ NOT NORMALIZED"
+            print(f"\n  5. Advantage stats:     mean={adv_mean:>8.4f}, std={adv_std:>8.4f}  {adv_status}")
+            print(f"     (Should be: mean≈0, std≈1 after normalization)")
+            
+            # 6. Old vs new logp
+            old_logp_mean = losses.get('old_logp_mean', 0.0)
+            new_logp_mean = losses.get('new_logp_mean', 0.0)
+            logp_status = "✓ OK" if abs(old_logp_mean - new_logp_mean) < 1.0 else "✗ DIVERGED"
+            print(f"\n  6. LogP sanity check:   old={old_logp_mean:>8.4f}, new={new_logp_mean:>8.4f}  {logp_status}")
+            print(f"     (Shouldn't diverge; if old≈new+KL≠0, check ratio calculation)")
+        
+        # ===== REWARD METRICS =====
+        print(f"\n{'-'*80}")
+        print(f"REWARD METRICS")
+        print(f"{'-'*80}")
+        
+        rewards = rollout['rewards'].cpu().numpy()
+        print(f"\n  Total return:    {rollout['episode_return']:>10.2f}")
+        print(f"  Mean reward:     {np.mean(rewards):>10.4f}")
+        print(f"  Std reward:      {np.std(rewards):>10.4f}")
+        print(f"  Min reward:      {np.min(rewards):>10.4f}")
+        print(f"  Max reward:      {np.max(rewards):>10.4f}")
+        print(f"  Episode length:  {len(rewards):>10d} steps")
+        
+        # ===== VALUE FUNCTION METRICS =====
+        print(f"\n{'-'*80}")
+        print(f"VALUE FUNCTION")
+        print(f"{'-'*80}")
+        
+        values = rollout['values']
+        if values.dim() > 1:
+            values_mean = values.mean(dim=1).cpu().numpy()
+        else:
+            values_mean = values.cpu().numpy()
+        
+        print(f"\n  Value mean:      {np.mean(values_mean):>10.4f}")
+        print(f"  Value std:       {np.std(values_mean):>10.4f}")
+        print(f"  Value min:       {np.min(values_mean):>10.4f}")
+        print(f"  Value max:       {np.max(values_mean):>10.4f}")
+        
+        # ===== ADVANTAGE METRICS =====
+        print(f"\n{'-'*80}")
+        print(f"ADVANTAGE ESTIMATION")
+        print(f"{'-'*80}")
+        
+        if advantages is not None:
+            adv_np = advantages.cpu().numpy()
+            print(f"\n  Advantage mean:  {np.mean(adv_np):>10.4f}")
+            print(f"  Advantage std:   {np.std(adv_np):>10.4f}")
+            print(f"  Advantage min:   {np.min(adv_np):>10.4f}")
+            print(f"  Advantage max:   {np.max(adv_np):>10.4f}")
+            
+            # Normalize check
+            if np.std(adv_np) > 0:
+                normalized_adv = (adv_np - np.mean(adv_np)) / (np.std(adv_np) + 1e-8)
+                print(f"  Normalized mean: {np.mean(normalized_adv):>10.4f} (should be ~0)")
+                print(f"  Normalized std:  {np.std(normalized_adv):>10.4f} (should be ~1)")
+        
+        # ===== EPISODE STATISTICS =====
+        print(f"\n{'-'*80}")
+        print(f"EPISODE STATISTICS")
+        print(f"{'-'*80}")
+        
+        stats = rollout['episode_stats']
+        print(f"\n  People rescued:           {stats['people_rescued']:>6d}")
+        print(f"  People found:             {stats['people_found']:>6d}")
+        print(f"  People alive:             {stats['people_alive']:>6d}")
+        print(f"  Nodes swept:              {stats['nodes_swept']:>6d}")
+        print(f"  High-risk redundancy:     {stats['high_risk_redundancy']:>6.2f}")
+        print(f"  Sweep complete:           {stats['sweep_complete']:>6} (1=yes, 0=no)")
+        print(f"  Time steps:               {stats['time_step']:>6d}")
+        
+        # ===== BATCH STATISTICS (if applicable) =====
+        if batch:
+            print(f"\n{'-'*80}")
+            print(f"BATCH STATISTICS (K={batch['num_episodes']} episodes)")
+            print(f"{'-'*80}")
+            
+            print(f"\n  Total transitions:  {batch['num_transitions']:>6d}")
+            print(f"  Episode returns:    {[f'{r:.2f}' for r in batch['episode_returns']]}")
+            print(f"  Mean return:        {np.mean(batch['episode_returns']):>10.2f}")
+            print(f"  Std return:         {np.std(batch['episode_returns']):>10.2f}")
+            
+            # Batch episode stats
+            batch_stats = batch['episode_stats']
+            print(f"  Mean people rescued: {np.mean([s['people_rescued'] for s in batch_stats]):>9.1f}")
+            print(f"  Mean nodes swept:    {np.mean([s['nodes_swept'] for s in batch_stats]):>9.1f}")
+        
+        print(f"\n{'='*80}\n")
+
+    
+    
     def compute_advantages(
         self,
         rewards: torch.Tensor,
@@ -412,24 +633,38 @@ class EnhancedPPOTrainer:
         values: torch.Tensor,
         final_value: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute GAE advantages."""
+        """Compute GAE advantages.
+        
+        CRITICAL FIX: Handle reward/value shape mismatch
+        - rewards: [T] (shared across all agents)
+        - values: [T, num_agents] (per-agent value estimates)
+        
+        Solution: Replicate rewards across agents for GAE computation
+        """
         T = rewards.size(0)
         values_reshaped = values.view(T, self.config.num_agents)
-        values_avg = values_reshaped.mean(dim=1)
+        
+        # Replicate shared reward across all agents (since reward is shared)
+        rewards_per_agent = rewards.unsqueeze(1).expand(-1, self.config.num_agents)  # [T, num_agents]
+        
+        # Take average value for bootstrapping (since reward is shared)
         final_value_avg = final_value.mean()
+        values_avg = values_reshaped.mean(dim=1)  # [T]
         
         values_with_bootstrap = torch.cat([values_avg, final_value_avg.unsqueeze(0)])
         
+        # Compute GAE on averaged values with shared rewards
         advantages = Policy.gae(
             rewards, dones, values_with_bootstrap,
             gamma=self.config.gamma,
             lambda_=self.config.gae_lambda
-        )
+        )  # [T]
         
-        returns = advantages + values_avg
+        returns = advantages + values_avg  # [T]
         
-        advantages = advantages.unsqueeze(1).expand(-1, self.config.num_agents).reshape(-1)
-        returns = returns.unsqueeze(1).expand(-1, self.config.num_agents).reshape(-1)
+        # Replicate advantages and returns across agents to match action/log_prob dimensions
+        advantages = advantages.unsqueeze(1).expand(-1, self.config.num_agents).reshape(-1)  # [T*num_agents]
+        returns = returns.unsqueeze(1).expand(-1, self.config.num_agents).reshape(-1)  # [T*num_agents]
         
         return advantages, returns
     
@@ -442,12 +677,25 @@ class EnhancedPPOTrainer:
         old_log_probs: torch.Tensor,
         advantages: torch.Tensor,
         returns: torch.Tensor,
+        valid_actions_per_step: List[List[List[str]]] = None,  # NEW: Valid actions for masking
     ) -> Dict[str, float]:
-        """Update policy and value networks."""
+        """Update policy and value networks with diagnostic metrics."""
         T = actions.size(0)
         total_policy_loss = 0.0
         total_value_loss = 0.0
         total_entropy = 0.0
+        total_approx_kl = 0.0
+        total_clip_fraction = 0.0
+        total_explained_var = 0.0
+        
+        # Normalize advantages to stabilize training
+        advantages_normalized = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
+        # Flatten returns to match dimensions
+        returns_flat = returns.reshape(-1)
+        old_log_probs_flat = old_log_probs.reshape(-1)
+        
+        first_epoch_metrics = {}
         
         for epoch in range(self.config.num_ppo_epochs):
             all_log_probs = []
@@ -464,7 +712,27 @@ class EnhancedPPOTrainer:
                 # Use automatic mixed precision for forward pass
                 with autocast(enabled=self.use_amp):
                     action_logits, _ = self.policy(obs_gpu, agent_indices)
-                    action_probs = F.softmax(action_logits, dim=-1)
+                    
+                    # CRITICAL FIX: Apply same masking as during action selection!
+                    if valid_actions_per_step is not None and t < len(valid_actions_per_step):
+                        valid_actions_list = valid_actions_per_step[t]
+                        
+                        # Create action masks
+                        action_masks = torch.zeros_like(action_logits, dtype=torch.bool, device=self.device)
+                        for i, valid_actions in enumerate(valid_actions_list):
+                            for action_str in valid_actions:
+                                action_idx = self.policy._action_str_to_idx(action_str)
+                                if action_idx < self.policy.max_actions:
+                                    action_masks[i, action_idx] = True
+                        
+                        # Apply masking BEFORE softmax (same as select_actions)
+                        masked_logits = action_logits.clone()
+                        masked_logits[~action_masks] = float('-inf')
+                        action_probs = F.softmax(masked_logits, dim=-1)
+                    else:
+                        # Fallback if no valid actions provided (shouldn't happen)
+                        action_probs = F.softmax(action_logits, dim=-1)
+                    
                     log_probs = torch.log(
                         action_probs[torch.arange(self.config.num_agents, device=self.device), actions[t]] + 1e-8
                     )
@@ -475,19 +743,60 @@ class EnhancedPPOTrainer:
                     value = self.value(obs_gpu, agent_indices)
                     all_values.append(value)
             
-            new_log_probs = torch.cat(all_log_probs)
+            new_log_probs = torch.cat(all_log_probs).reshape(-1)
             new_action_probs = torch.cat(all_action_probs)
-            new_values = torch.cat(all_values)
-            old_log_probs_flat = old_log_probs.reshape(-1)
+            new_values = torch.cat(all_values).reshape(-1)
+            
+            # COMPUTE FIRST EPOCH DIAGNOSTICS ONLY (before weights change)
+            if epoch == 0:
+                # 1. Approximate KL divergence
+                first_epoch_metrics['approx_kl'] = (old_log_probs_flat - new_log_probs).mean().item()
+                
+                # 2. Clipping fraction
+                ratio = torch.exp(new_log_probs - old_log_probs_flat)
+                clipped = torch.abs(ratio - 1.0) > self.config.clip_epsilon
+                first_epoch_metrics['clip_fraction'] = clipped.float().mean().item()
+                
+                # 3. Entropy (from action probs)
+                first_epoch_metrics['entropy_val'] = Policy.entropy_bonus(new_action_probs).item()
+                
+                # 4. Explained variance (critic performance)
+                var_returns = torch.var(returns_flat).item()
+                var_residual = torch.var(returns_flat - new_values).item()
+                first_epoch_metrics['explained_var'] = 1.0 - (var_residual / (var_returns + 1e-8))
+                
+                # 5. Advantage statistics
+                first_epoch_metrics['adv_mean'] = advantages_normalized.mean().item()
+                first_epoch_metrics['adv_std'] = advantages_normalized.std().item()
+                
+                # 6. Old vs new logp statistics (sanity check)
+                first_epoch_metrics['old_logp_mean'] = old_log_probs_flat.mean().item()
+                first_epoch_metrics['new_logp_mean'] = new_log_probs.mean().item()
             
             # Compute losses with mixed precision
             with autocast(enabled=self.use_amp):
                 policy_loss = Policy.policy_loss(
-                    advantages, old_log_probs_flat, new_log_probs,
+                    advantages_normalized, old_log_probs_flat, new_log_probs,
                     clip_epsilon=self.config.clip_epsilon
                 )
                 
-                value_loss = Value.value_loss(new_values, returns)
+                # VALUE CLIPPING: Prevent critic from changing too fast
+                # Clip new values to be close to old value predictions
+                value_clip_margin = 0.2
+                old_values_for_clip = torch.cat([
+                    self.value(obs.to(self.device) if hasattr(obs, 'to') else obs, 
+                               agent_indices_list[t]).detach()
+                    for t, obs in enumerate(observations)
+                ]).reshape(-1)
+                
+                values_clipped = old_values_for_clip + torch.clamp(
+                    new_values - old_values_for_clip, 
+                    -value_clip_margin, 
+                    value_clip_margin
+                )
+                
+                # Use clipped values for MSE loss
+                value_loss = Value.value_loss(values_clipped, returns_flat)
                 entropy = Policy.entropy_bonus(new_action_probs)
                 
                 loss = (
@@ -532,14 +841,28 @@ class EnhancedPPOTrainer:
             total_value_loss += value_loss.item()
             total_entropy += entropy.item()
         
+        # Compute averages
+        num_epochs = self.config.num_ppo_epochs
+        avg_policy_loss = total_policy_loss / num_epochs
+        avg_value_loss = total_value_loss / num_epochs
+        avg_entropy = total_entropy / num_epochs
+        
+        # Use first epoch metrics for diagnostics
         return {
-            'policy_loss': total_policy_loss / self.config.num_ppo_epochs,
-            'value_loss': total_value_loss / self.config.num_ppo_epochs,
-            'entropy': total_entropy / self.config.num_ppo_epochs,
+            'policy_loss': avg_policy_loss,
+            'value_loss': avg_value_loss,
+            'entropy': avg_entropy,
+            'approx_kl': first_epoch_metrics.get('approx_kl', 0.0),
+            'clip_fraction': first_epoch_metrics.get('clip_fraction', 0.0),
+            'explained_var': first_epoch_metrics.get('explained_var', 0.0),
+            'adv_mean': first_epoch_metrics.get('adv_mean', 0.0),
+            'adv_std': first_epoch_metrics.get('adv_std', 1.0),
+            'old_logp_mean': first_epoch_metrics.get('old_logp_mean', 0.0),
+            'new_logp_mean': first_epoch_metrics.get('new_logp_mean', 0.0),
         }
     
     
-    def evaluate(self, num_episodes: int = None) -> Dict[str, float]:
+    def evaluate(self, num_episodes: int = None, iteration: int = 0) -> Dict[str, float]:
         """
         Run evaluation episodes on held-out layouts.
         
@@ -548,6 +871,7 @@ class EnhancedPPOTrainer:
         
         Args:
             num_episodes: Number of eval episodes (default from config)
+            iteration: Current training iteration (for trajectory labeling)
             
         Returns:
             summary: Aggregated evaluation metrics
@@ -594,6 +918,14 @@ class EnhancedPPOTrainer:
         
         print(f"Eval complete: return={summary['return_mean']:.2f}±{summary['return_std']:.2f}")
         
+        # Generate agent trajectory visualization for this evaluation
+        try:
+            viz_path = os.path.join(self.logger.exp_dir, f"eval_agent_trajectories_iter{iteration:04d}.png")
+            plot_agent_trajectories(self, max_steps=self.config.steps_per_rollout, deterministic=True, save_path=viz_path,
+                                    title=f"Eval Agent Trajectories (Iter {iteration}, Return {summary['return_mean']:.1f})")
+        except Exception as e:
+            print(f"⚠️  Warning: could not generate agent trajectory visualization: {e}")
+
         return summary
     
     
@@ -632,7 +964,7 @@ class EnhancedPPOTrainer:
     
     def load_checkpoint(self, path: str):
         """Load model checkpoint."""
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.policy.load_state_dict(checkpoint['policy_state'])
         self.value.load_state_dict(checkpoint['value_state'])
         self.policy_optimizer.load_state_dict(checkpoint['policy_optimizer_state'])
@@ -662,6 +994,10 @@ class EnhancedPPOTrainer:
         
         for iteration in range(self.config.num_iterations):
             try:
+                # Show progress for first few iterations
+                if iteration < 5:
+                    print(f"Collecting rollout for iteration {iteration}...")
+                
                 # ===== CHANGE: Collect batch of rollouts =====
                 if self.config.batch_rollout_size > 1:
                     # Collect multiple rollouts and aggregate
@@ -677,7 +1013,8 @@ class EnhancedPPOTrainer:
                         batch['actions'],
                         batch['log_probs'],
                         batch['advantages'],
-                        batch['returns']
+                        batch['returns'],
+                        batch.get('valid_actions_per_step', None)  # Pass valid actions
                     )
                     
                     # Log average metrics across batch
@@ -694,11 +1031,14 @@ class EnhancedPPOTrainer:
                             avg_return
                         )
                         
-                        print(f"Iter {iteration:4d} | "
-                              f"Batch Return: {avg_return:7.2f} (n={batch['num_episodes']}) | "
-                              f"Policy Loss: {losses['policy_loss']:7.4f} | "
-                              f"Rescued: {avg_stats['people_rescued']:2.1f} | "
-                              f"Redundancy: {avg_stats['high_risk_redundancy']:.2f}")
+                        # Simple progress print (detailed metrics in CSV)
+                        coverage = avg_stats.get('nodes_swept', 0)
+                        rescued = avg_stats.get('people_rescued', 0)
+                        loops = avg_stats.get('loop_detections', 0)
+                        p_loss = losses['policy_loss']
+                        v_loss = losses['value_loss']
+                        print(f"{iteration:5d} | {avg_return:7.1f} | {coverage:8.1f} | {rescued:7.1f} | "
+                              f"P_loss:{p_loss:6.3f} V_loss:{v_loss:6.3f}")
                 else:
                     # Original single rollout per iteration
                     layout_seed = random.choice(self.train_layout_seeds)
@@ -723,7 +1063,8 @@ class EnhancedPPOTrainer:
                         rollout['actions'],
                         rollout['log_probs'],
                         advantages,
-                        returns
+                        returns,
+                        rollout.get('valid_actions_per_step', None)  # Pass valid actions
                     )
                     
                     # Log training metrics
@@ -735,11 +1076,14 @@ class EnhancedPPOTrainer:
                             rollout['episode_return']
                         )
                         
-                        print(f"Iter {iteration:4d} | "
-                              f"Return: {rollout['episode_return']:7.2f} | "
-                              f"Policy Loss: {losses['policy_loss']:7.4f} | "
-                              f"Rescued: {rollout['episode_stats']['people_rescued']:2d} | "
-                              f"Redundancy: {rollout['episode_stats']['high_risk_redundancy']:.2f}")
+                        # Simple progress print (detailed metrics in CSV)
+                        coverage = rollout['episode_stats'].get('nodes_swept', 0)
+                        rescued = rollout['episode_stats'].get('people_rescued', 0)
+                        loops = rollout['episode_stats'].get('loop_detections', 0)
+                        p_loss = losses['policy_loss']
+                        v_loss = losses['value_loss']
+                        print(f"{iteration:5d} | {rollout['episode_return']:7.1f} | {coverage:8d} | {rescued:7d} | "
+                              f"P_loss:{p_loss:6.3f} V_loss:{v_loss:6.3f}")
                 
                 # Evaluate and checkpoint
                 if (iteration + 1) % self.config.eval_interval == 0:
@@ -747,7 +1091,7 @@ class EnhancedPPOTrainer:
                     print(f"Evaluation at iteration {iteration + 1}/{self.config.num_iterations}")
                     print(f"Progress: {(iteration + 1) / self.config.num_iterations * 100:.1f}%")
                     print(f"{'='*60}")
-                    eval_summary = self.evaluate()
+                    eval_summary = self.evaluate(iteration=iteration+1)
                     self.logger.log_eval(iteration, eval_summary)
                     
                     # Check if best model
@@ -766,14 +1110,14 @@ class EnhancedPPOTrainer:
                     self.save_checkpoint(iteration)
             
             except KeyboardInterrupt:
-                print("\n\n⚠️  Training interrupted by user at iteration", iteration)
+                print("\n\n⚠️ Training interrupted by user at iteration", iteration)
                 print("Saving checkpoint before exit...")
                 self.save_checkpoint(iteration, extra={'interrupted': True})
                 print("Checkpoint saved. Exiting.")
                 return
             
             except Exception as e:
-                print(f"\n\n❌ Error at iteration {iteration}: {type(e).__name__}: {e}")
+                print(f"\n\n Error at iteration {iteration}: {type(e).__name__}: {e}")
                 print("Saving emergency checkpoint...")
                 try:
                     self.save_checkpoint(iteration, extra={'error': str(e)})
@@ -800,7 +1144,8 @@ class EnhancedPPOTrainer:
 
 
 if __name__ == "__main__":
-    # Example: Train on office with default config
-    config = PPOConfig.get_default("office")
+    # Example: Train on daycare (babycare) with comprehensive diagnostics
+    config = PPOConfig.get_default("daycare")
+    config.log_interval = 10  # Print comprehensive diagnostics every 10 iterations
     trainer = EnhancedPPOTrainer(config)
     trainer.train()
