@@ -1,0 +1,12 @@
+torch>=2.0.0
+torchvision
+torch-geometric
+torch-scatter
+torch-sparse
+networkx
+numpy
+matplotlib
+pandas
+tensorboard
+pyyaml
+tqdm

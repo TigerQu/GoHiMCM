@@ -22,14 +22,14 @@ class BuildingFireEnvironment:
     """
     Main simulation environment for fire evacuation.
     
-    This class manages:
-    - Building topology (graph of nodes and edges)
-    - People and their states
-    - Firefighter agents and their actions
-    - Hazard dynamics (fire and smoke spread)
-    - Observation generation for learning algorithms
+    Manages:
+    - building topology (graph of nodes and edges)
+    - people and their states
+    - firefighter agents and their actions
+    - hazard dynamics (fire and smoke spread)
+    - observation generation for learning algorithms
     
-    The environment operates in discrete time steps.
+    Operates in discrete time steps.
     """
     
     def __init__(self, config: Optional[Dict] = None):
@@ -37,7 +37,7 @@ class BuildingFireEnvironment:
         Initialize the environment.
         
         Args:
-            config: Optional configuration dictionary (uses defaults if not provided)
+            config: optional config dict (uses defaults if not provided)
         """
         # Configuration
         self.config = {**DEFAULT_CONFIG, **(config or {})}
@@ -99,10 +99,10 @@ class BuildingFireEnvironment:
         self._np_rng = np.random.RandomState()
 
     def _update_responder_exposure(self) -> None:
-        #Update responder HP and exposure based on hazard exposure.
+        # update responder HP and exposure based on hazard exposure
         Xi_max = self.config["responder_Xi_max"]
         for agent in self.agents.values():
-            # Skip already inactive agents
+            # skip already inactive agents
             if not getattr(agent, "is_active", True):
                continue
         node = self.nodes[agent.node_id]
@@ -120,11 +120,10 @@ class BuildingFireEnvironment:
             agent.hp = max(0.0, agent.hp - hp_loss)
             agent.exposure += exposure_gain
 
-        # Deactivate if over exposure limit or HP depleted
+        # deactivate if over exposure limit or HP depleted
         if agent.exposure > Xi_max or agent.hp <= 0.0:
             agent.active = False
             
-        # Add this new method to BuildingFireEnvironment class:
     def compute_high_risk_redundancy(self) -> float:
         """Compute fraction of high-risk rooms with at least 2 independent passes."""
         high = [n for n in self.nodes.values() if n.risk_level == "high"]
@@ -136,12 +135,12 @@ class BuildingFireEnvironment:
         
     #helpers for edge load tracking
     def _edge_inc(self, u: str, v: str) -> None:
-        """Increment edge load counter (person entering edge)."""
+        """increment edge load counter (person entering edge)"""
         key = (u, v) if u < v else (v, u)
         self._edge_load[key] = self._edge_load.get(key, 0) + 1
     
     def _edge_dec(self, u: str, v: str) -> None:
-        """Decrement edge load counter (person leaving edge)."""
+        """decrement edge load counter (person leaving edge)"""
         key = (u, v) if u < v else (v, u)
         if key in self._edge_load:
             self._edge_load[key] = max(0, self._edge_load[key] - 1)
@@ -153,9 +152,9 @@ class BuildingFireEnvironment:
         Add a node (room/hallway/exit) to the building.
         
         Args:
-            nid: Node ID (unique string identifier)
-            ntype: Node type ('room', 'hall', or 'exit')
-            **kwargs: Additional node properties (area, length, has_sensor, etc.)
+            nid: node ID (unique string identifier)
+            ntype: node type ('room', 'hall', or 'exit')
+            **kwargs: additional node properties (area, length, has_sensor, etc.)
         """
         if ntype not in NODE_TYPES:
             raise ValueError(f"Invalid node type: {ntype}. Must be one of {list(NODE_TYPES.keys())}")
@@ -175,9 +174,9 @@ class BuildingFireEnvironment:
         Add an edge (connection) between two nodes.
         
         Args:
-            u: Source node ID
-            v: Target node ID
-            **kwargs: Edge properties (width, length, door, fire_door, etc.)
+            u: source node ID
+            v: target node ID
+            **kwargs: edge properties (width, length, door, fire_door, etc.)
         """
         if u not in self.nodes or v not in self.nodes:
             raise ValueError(f"Both nodes must exist before adding edge: {u}, {v}")
@@ -195,9 +194,9 @@ class BuildingFireEnvironment:
         Spawn person at location with mobility-appropriate tenability threshold.
         
         Tenability thresholds model physiological vulnerability:
-        - Children: 60 HP (more vulnerable, become incapacitated earlier)
-        - Limited mobility: 50 HP (vulnerable due to pre-existing conditions)
-        - Adults: 40 HP (baseline)
+        - children: 60 HP (more vulnerable, become incapacitated earlier)
+        - limited mobility: 50 HP (vulnerable due to pre-existing conditions)
+        - adults: 40 HP (baseline)
         """
         if node_id not in self.nodes:
             raise ValueError(f"Node {node_id} does not exist")

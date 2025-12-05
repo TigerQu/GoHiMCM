@@ -15,49 +15,47 @@ class Policy(nn.Module):
     """
     Policy network for multi-agent building evacuation.
     
-    ===== MAJOR CHANGES FROM ORIGINAL =====
-    1. Now properly handles PyG Data objects from environment
-    2. Implements agent-centric readout (gets embedding for each agent's node)
-    3. Implements action masking using env.get_valid_actions()
-    4. Proper multi-agent action selection
-    5. Fixed dimensions to match GAT output (24, not arbitrary)
-    6. Added action space mapping (wait/search/move_X)
+    Main improvements:
+    - handles PyG Data objects from environment
+    - agent-centric readout (gets embedding for each agent's node)
+    - action masking using env.get_valid_actions()
+    - proper multi-agent action selection
+    - fixed dimensions to match GAT output
+    - action space mapping (wait/search/move_X)
     """
     def __init__(self, num_agents: int = 2, max_actions: int = 15) -> None:
         """
         Initialize policy network.
         
-        ===== CHANGE 1: Added constructor parameters for multi-agent =====
-        
         Args:
-            num_agents: Number of firefighter agents (default 2 for standard layouts)
-            max_actions: Maximum number of possible actions per agent
-                        (wait, search, + up to ~10 move actions depending on graph connectivity)
+            num_agents: number of firefighter agents (default 2 for standard layouts)
+            max_actions: max possible actions per agent
+                        (wait, search, + up to ~10 move actions depending on graph)
         """
         super().__init__()
         self.num_agents = num_agents
         self.max_actions = max_actions
         
-        # Instantiate GAT 
+        # instantiate GAT 
         self.gat = GAT()
         
-        # ===== CHANGE 2: Fixed input dimension to match GAT output =====
+        # fixed input dimension to match GAT output
         # GAT outputs 48-dim embeddings per node (updated for RTX 5090)
-        # We concatenate: [agent_node_embedding (48) + global_embedding (48) + agent_id_onehot (num_agents)] 
-        self.agent_feature_dim = 48  # From GAT output (increased from 24)
-        self.input_dim = self.agent_feature_dim * 2 + num_agents  # Agent + global + ID = 96 + num_agents
+        # we concatenate: [agent_node_embedding (48) + global_embedding (48) + agent_id_onehot (num_agents)] 
+        self.agent_feature_dim = 48  # from GAT output (bumped up from 24)
+        self.input_dim = self.agent_feature_dim * 2 + num_agents  # agent + global + ID = 96 + num_agents
         
-        # ===== CHANGE 3: Output dimension matches action space =====
-        # Actions: 0=wait, 1=search, 2...k=move_neighbor_i
-        # We'll use max_actions and mask invalid ones
-        # Larger network for RTX 5090
+        # output dimension matches action space
+        # actions: 0=wait, 1=search, 2...k=move_neighbor_i
+        # we use max_actions and mask invalid ones
+        # larger network for RTX 5090
         self.action_head = nn.Sequential(
-            nn.Linear(self.input_dim, 128),  # Increased from 64
+            nn.Linear(self.input_dim, 128),  # bumped up from 64
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(128, 64),  # Increased from 32
+            nn.Linear(128, 64),  # bumped up from 32
             nn.ReLU(),
-            nn.Linear(64, self.max_actions)  # Logits for all possible actions
+            nn.Linear(64, self.max_actions)  # logits for all possible actions
         )
         
     
@@ -78,49 +76,47 @@ class Policy(nn.Module):
         """
         Compute action logits for all agents based on current observation.
         
-        ===== CHANGE 4: Complete rewrite to handle multi-agent properly =====
-        
         Args:
-            data (Data): PyG Data object from env.get_observation()
-                Contains x [N, 11], edge_index [2, E]
-            agent_node_indices (Tensor[num_agents]): Index of each agent's current node
-                From env.get_agent_node_index(agent_id) for each agent
+            data: PyG Data object from env.get_observation()
+                  contains x [N, 11], edge_index [2, E]
+            agent_node_indices: index of each agent's current node [num_agents]
+                                from env.get_agent_node_index(agent_id) for each agent
             
         Returns:
-            action_logits (Tensor[num_agents, max_actions]): Logits for each agent's actions
-            node_embeddings (Tensor[N, 48]): Node embeddings (for value function reuse)
+            action_logits [num_agents, max_actions]: logits for each agent's actions
+            node_embeddings [N, 48]: node embeddings (for value function reuse)
         
         Example:
             obs = env.get_observation()
             agent_indices = torch.tensor([env.get_agent_node_index(0), 
                                          env.get_agent_node_index(1)])
             logits, embeddings = policy(obs, agent_indices)
-            # Apply action masking, then sample actions
+            # apply action masking, then sample actions
         """
-        # Process entire building graph through GAT 
+        # process entire building graph through GAT 
         node_embeddings = self.gat(data)  # [N, 48]
         
-        # Get global building state
+        # get global building state
         global_embedding = self.gat.get_global_embedding(node_embeddings)  # [48]
         
-        # Extract agent-specific features
-        # For each agent, get their node's embedding + global context + agent ID
+        # extract agent-specific features
+        # for each agent: their node embedding + global context + agent ID
         agent_features = []
         for i in range(self.num_agents):
             agent_idx = agent_node_indices[i]
             agent_node_emb = node_embeddings[agent_idx]  # [48]
             
-            # Create one-hot agent ID to differentiate agents
+            # create one-hot agent ID to differentiate agents
             agent_id_onehot = torch.zeros(self.num_agents, device=node_embeddings.device)
             agent_id_onehot[i] = 1.0
             
-            # Concatenate agent's local view with global context and agent ID
+            # concatenate agent's local view with global context and agent ID
             agent_feat = torch.cat([agent_node_emb, global_embedding, agent_id_onehot], dim=-1)  # [96 + num_agents]
             agent_features.append(agent_feat)
         
         agent_features = torch.stack(agent_features)  # [num_agents, 96 + num_agents]
         
-        # ===== Step 4: Compute action logits for each agent =====
+        # compute action logits for each agent
         action_logits = self.action_head(agent_features)  # [num_agents, max_actions]
         
         return action_logits, node_embeddings
@@ -135,51 +131,50 @@ class Policy(nn.Module):
         """
         Compute action logits using POMDP masking for partial observability.
         
-        ===== NEW METHOD: POMDP-aware policy forward pass =====
-        Decentralized actor receives partial observation (masked occupants).
-        Centralized critic receives full state (privileged information).
+        Decentralized actor gets partial observation (masked occupants).
+        Centralized critic gets full state (privileged information).
         
         Args:
-            data (Data): Full environment state from env.get_observation()
-            agent_node_indices (Tensor[num_agents]): Current node of each agent
-            agent_seen_nodes_list (List[Set[int]]): Nodes each agent has visited
-                seen_nodes[i] = Set of node indices agent i has seen
+            data: full environment state from env.get_observation()
+            agent_node_indices: current node of each agent [num_agents]
+            agent_seen_nodes_list: nodes each agent has visited
+                                   seen_nodes[i] = Set of node indices agent i has seen
             
         Returns:
-            action_logits (Tensor[num_agents, max_actions]): Logits for each agent's actions
-            critic_node_embeddings (Tensor[N, 48]): Node embeddings from critic (full state)
-            actor_node_embeddings_list (List[Tensor]): Node embeddings from each agent's actor
+            action_logits [num_agents, max_actions]: logits for each agent's actions
+            critic_node_embeddings [N, 48]: node embeddings from critic (full state)
+            actor_node_embeddings_list: node embeddings from each agent's actor
         """
-        # ===== CHANGE: Build actor data (masked) and critic data (full) =====
+        # build actor data (masked) and critic data (full)
         actor_data_list, critic_data = GAT.process_batch_with_pomdp(data, agent_seen_nodes_list)
         
-        # Process full state through critic
+        # process full state through critic
         critic_node_embeddings = self.gat(critic_data)  # [N, 48]
         
-        # Process partial observations through actor for each agent
+        # process partial observations through actor for each agent
         actor_node_embeddings_list = []
         for actor_data in actor_data_list:
-            # ===== CHANGE: Each agent sees masked graph =====
+            # each agent sees masked graph
             actor_embeddings = self.gat(actor_data)  # [N, 48]
             actor_node_embeddings_list.append(actor_embeddings)
         
-        # Get action logits from partial observations
-        # (policy uses masked actor embeddings)
+        # get action logits from partial observations
+        # policy uses masked actor embeddings
         agent_features = []
         for i in range(self.num_agents):
             agent_idx = agent_node_indices[i]
-            # ===== CHANGE: Use actor embeddings (from masked observation) =====
+            # use actor embeddings (from masked observation)
             actor_emb = actor_node_embeddings_list[i]
             agent_node_emb = actor_emb[agent_idx]  # [48]
             
-            # Get global context from full critic state
+            # get global context from full critic state
             critic_global = self.gat.get_global_embedding(critic_node_embeddings)
             
-            # Create one-hot agent ID to differentiate agents
+            # create one-hot agent ID to differentiate agents
             agent_id_onehot = torch.zeros(self.num_agents, device=critic_node_embeddings.device)
             agent_id_onehot[i] = 1.0
             
-            # Concatenate local actor view with global critic context and agent ID
+            # concatenate local actor view with global critic context and agent ID
             agent_feat = torch.cat([agent_node_emb, critic_global, agent_id_onehot], dim=-1)  # [96 + num_agents]
             agent_features.append(agent_feat)
         
@@ -199,30 +194,28 @@ class Policy(nn.Module):
         """
         Select actions for all agents with proper action masking.
         
-        ===== NEW METHOD: Implements action masking and sampling =====
-        
         Args:
-            data (Data): Current observation
-            agent_node_indices (Tensor[num_agents]): Where each agent is
-            valid_actions_list (List[List[str]]): Valid actions for each agent
-                From [env.get_valid_actions(i) for i in range(num_agents)]
-            deterministic (bool): If True, take argmax; if False, sample
+            data: current observation
+            agent_node_indices: where each agent is [num_agents]
+            valid_actions_list: valid actions for each agent
+                                from [env.get_valid_actions(i) for i in range(num_agents)]
+            deterministic: if True, take argmax; if False, sample
             
         Returns:
-            actions (Tensor[num_agents]): Selected action indices
-            log_probs (Tensor[num_agents]): Log probabilities of selected actions
-            action_probs (Tensor[num_agents, max_actions]): Full probability distribution
+            actions [num_agents]: selected action indices
+            log_probs [num_agents]: log probabilities of selected actions
+            action_probs [num_agents, max_actions]: full probability distribution
         """
-        # Get device from agent_node_indices
+        # get device from agent_node_indices
         device = agent_node_indices.device
         
-        # Get logits
+        # get logits
         action_logits, _ = self.forward(data, agent_node_indices)  # [num_agents, max_actions]
         
-        # ===== Apply action masking with stable sorted indexing =====
-        # Build act2idx mapping from sorted valid_actions for each agent
+        # apply action masking with stable sorted indexing
+        # build act2idx mapping from sorted valid_actions for each agent
         action_masks = torch.zeros_like(action_logits, dtype=torch.bool, device=device)
-        agent_action_maps = []  # Store mapping for each agent
+        agent_action_maps = []  # store mapping for each agent
         
         for i, valid_actions in enumerate(valid_actions_list):
             # Sort actions for stable indexing
@@ -259,17 +252,15 @@ class Policy(nn.Module):
         """
         Map action string from env to action index using stable sorted mapping.
         
-        ===== CRITICAL FIX: Stable action indexing =====
-        
-        Problem: Hash-based mapping is unstable and causes collisions.
-        Solution: Build sorted action list per step, map by position.
+        Problem: hash-based mapping is unstable and causes collisions
+        Solution: build sorted action list per step, map by position
         
         Args:
-            action_str: Action string (e.g., 'wait', 'search', 'move_R_1_2')
-            valid_actions: Sorted list of valid actions for current step
+            action_str: action string (e.g., 'wait', 'search', 'move_R_1_2')
+            valid_actions: sorted list of valid actions for current step
         
         Convention (when valid_actions provided):
-            Index = position in sorted(valid_actions)
+            index = position in sorted(valid_actions)
         
         Fallback (when valid_actions not provided):
             0: "wait"
@@ -309,26 +300,25 @@ class Policy(nn.Module):
         """
         Compute Generalized Advantage Estimation (GAE).
         
-        ===== CHANGE 5: Fixed GAE computation =====
-        Original had syntax errors and logic issues.
+        Fixed from original which had syntax errors and logic issues.
         
         Args:
-            rewards (Tensor[T]): Rewards at each timestep
-            dones (Tensor[T]): Done flags (1 if episode ended, 0 otherwise)
-            values (Tensor[T+1]): Value predictions (includes bootstrap value)
-            gamma (float): Discount factor
-            lambda_ (float): GAE lambda parameter
+            rewards [T]: rewards at each timestep
+            dones [T]: done flags (1 if episode ended, 0 otherwise)
+            values [T+1]: value predictions (includes bootstrap value)
+            gamma: discount factor
+            lambda_: GAE lambda parameter
         
         Returns:
-            advantages (Tensor[T]): GAE advantages
+            advantages [T]: GAE advantages
         """
         T = rewards.size(0)
         advantages = torch.zeros_like(rewards)
         
-        # Compute TD residuals: δ_t = r_t + γ * V(s_{t+1}) - V(s_t)
+        # compute TD residuals: δ_t = r_t + γ * V(s_{t+1}) - V(s_t)
         deltas = rewards + gamma * values[1:] * (1 - dones) - values[:-1]
         
-        # Compute GAE recursively from end to start
+        # compute GAE recursively from end to start
         gae = 0
         for t in reversed(range(T)):
             gae = deltas[t] + gamma * lambda_ * (1 - dones[t]) * gae
@@ -347,26 +337,25 @@ class Policy(nn.Module):
         """
         Compute PPO clipped policy loss.
         
-        ===== CHANGE 6: Simplified and fixed policy objective =====
-        Original was overcomplicated and had errors.
+        Simplified and fixed from original which was overcomplicated.
         
         Args:
-            advantages (Tensor[T]): GAE advantages
-            old_log_probs (Tensor[T]): Log probs from old policy (frozen)
-            new_log_probs (Tensor[T]): Log probs from current policy
-            clip_epsilon (float): PPO clipping parameter
+            advantages [T]: GAE advantages
+            old_log_probs [T]: log probs from old policy (frozen)
+            new_log_probs [T]: log probs from current policy
+            clip_epsilon: PPO clipping parameter
             
         Returns:
-            loss (Tensor): Policy loss (negative because we maximize)
+            policy loss (negative because we maximize)
         """
-        # Compute probability ratio: π_new / π_old
+        # compute probability ratio: π_new / π_old
         ratio = torch.exp(new_log_probs - old_log_probs)
         
-        # Clipped surrogate objective
+        # clipped surrogate objective
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * advantages
         
-        # Take minimum (pessimistic bound)
+        # take minimum (pessimistic bound)
         policy_loss = -torch.min(surr1, surr2).mean()
         
         return policy_loss
@@ -377,13 +366,11 @@ class Policy(nn.Module):
         """
         Compute entropy bonus to encourage exploration.
         
-        ===== NEW METHOD: Separated entropy calculation =====
-        
         Args:
-            action_probs (Tensor[..., num_actions]): Action probability distributions
+            action_probs [..., num_actions]: action probability distributions
             
         Returns:
-            entropy (Tensor): Mean entropy across all distributions
+            mean entropy across all distributions
         """
         entropy = -torch.sum(action_probs * torch.log(action_probs + 1e-8), dim=-1)
         return entropy.mean()
@@ -393,37 +380,37 @@ class Value(nn.Module):
     """
     Value network for estimating state values.
     
-    ===== MAJOR CHANGES FROM ORIGINAL =====
-    1. Now properly handles PyG Data objects
-    2. Agent-centric value estimation (can estimate per-agent or global)
-    3. Fixed dimensions to match GAT output
+    Main improvements:
+    - handles PyG Data objects properly
+    - agent-centric value estimation (per-agent or global)
+    - fixed dimensions to match GAT output
     """
     def __init__(self, num_agents: int = 2) -> None:
         """
         Initialize value network.
         
         Args:
-            num_agents: Number of agents (for multi-agent value estimation)
+            num_agents: number of agents (for multi-agent value estimation)
         """
         super().__init__()
         self.num_agents = num_agents
         
-        # Instantiate GAT (shared with policy or separate - your choice)
+        # instantiate GAT (shared with policy or separate - your choice)
         self.gat = GAT()
         
-        # ===== CHANGE 7: Fixed input dimension =====
-        # Same as policy: agent_embedding (48) + global_embedding (48) + agent_id (num_agents) = 96 + num_agents
+        # fixed input dimension
+        # same as policy: agent_embedding (48) + global_embedding (48) + agent_id (num_agents) = 96 + num_agents
         self.input_dim = 96 + num_agents
         
-        # Value head outputs single scalar value
-        # Larger network for RTX 5090
+        # value head outputs single scalar value
+        # larger network for RTX 5090
         self.value_head = nn.Sequential(
-            nn.Linear(self.input_dim, 128),  # Increased from 64
+            nn.Linear(self.input_dim, 128),  # bumped up from 64
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(128, 64),  # Increased from 32
+            nn.Linear(128, 64),  # bumped up from 32
             nn.ReLU(),
-            nn.Linear(64, 1)  # Single value output
+            nn.Linear(64, 1)  # single value output
         )
 
     
@@ -444,30 +431,28 @@ class Value(nn.Module):
         """
         Estimate value of current state.
         
-        ===== CHANGE 8: Complete rewrite for proper value estimation =====
-        
         Args:
-            data (Data): PyG Data object from env.get_observation()
-            agent_node_indices (Tensor[num_agents], optional): Agent positions
-                If None, uses global pooling only
+            data: PyG Data object from env.get_observation()
+            agent_node_indices [num_agents], optional: agent positions
+                                                       if None, uses global pooling only
             
         Returns:
-            values (Tensor[num_agents] or Tensor[1]): State value estimates
+            state value estimates [num_agents] or [1]
         """
-        # Process building graph
+        # process building graph
         node_embeddings = self.gat(data)  # [N, 48]
         
-        # Get global state
+        # get global state
         global_embedding = self.gat.get_global_embedding(node_embeddings)  # [48]
         
         if agent_node_indices is not None:
-            # Agent-specific values (like policy)
+            # agent-specific values (like policy)
             values = []
             for i in range(self.num_agents):
                 agent_idx = agent_node_indices[i]
                 agent_node_emb = node_embeddings[agent_idx]
                 
-                # Add agent ID one-hot encoding (same as policy)
+                # add agent ID one-hot encoding (same as policy)
                 agent_id_onehot = torch.zeros(self.num_agents, device=agent_node_emb.device)
                 agent_id_onehot[i] = 1.0
                 
@@ -476,7 +461,7 @@ class Value(nn.Module):
                 values.append(value)
             return torch.cat(values)  # [num_agents]
         else:
-            # Global value (pooled state only) - add zero padding for agent ID
+            # global value (pooled state only) - add zero padding for agent ID
             agent_id_padding = torch.zeros(self.num_agents, device=global_embedding.device)
             global_feat = torch.cat([global_embedding, global_embedding, agent_id_padding], dim=-1)  # [96 + num_agents]
             return self.value_head(global_feat)  # [1]
@@ -490,31 +475,30 @@ class Value(nn.Module):
         """
         Estimate value using full state (centralized critic with privileged information).
         
-        ===== NEW METHOD: POMDP-aware value function =====
-        The critic has access to full state (centralized), giving better value estimates
-        without leaking privileged information into the policy.
+        The critic gets access to full state (centralized), giving better value estimates
+        without leaking privileged info into the policy.
         
         Args:
-            data (Data): Full environment state from env.get_observation()
-            agent_node_indices (Tensor[num_agents]): Current node of each agent
+            data: full environment state from env.get_observation()
+            agent_node_indices: current node of each agent [num_agents]
             
         Returns:
-            values (Tensor[num_agents]): Value estimates (one per agent)
+            value estimates (one per agent) [num_agents]
         """
-        # ===== CHANGE: Critic always sees full state =====
-        critic_data = build_critic_data(data)  # No masking - privileged information
+        # critic always sees full state
+        critic_data = build_critic_data(data)  # no masking - privileged information
         
-        # Process through GAT
+        # process through GAT
         node_embeddings = self.gat(critic_data)  # [N, 48]
         global_embedding = self.gat.get_global_embedding(node_embeddings)  # [48]
         
-        # Get value for each agent
+        # get value for each agent
         values = []
         for i in range(self.num_agents):
             agent_idx = agent_node_indices[i]
             agent_node_emb = node_embeddings[agent_idx]
             
-            # Add agent ID one-hot encoding (same as policy)
+            # add agent ID one-hot encoding (same as policy)
             agent_id_onehot = torch.zeros(self.num_agents, device=agent_node_emb.device)
             agent_id_onehot[i] = 1.0
             
@@ -534,15 +518,13 @@ class Value(nn.Module):
         """
         Compute value function loss with optional clipping.
         
-        ===== NEW METHOD: Value loss computation =====
-        
         Args:
-            predicted_values (Tensor[T]): Predicted values from network
-            returns (Tensor[T]): Actual returns (rewards-to-go or GAE targets)
-            clip_epsilon (float): Clipping parameter (optional)
+            predicted_values [T]: predicted values from network
+            returns [T]: actual returns (rewards-to-go or GAE targets)
+            clip_epsilon: clipping parameter (optional)
             
         Returns:
-            loss (Tensor): MSE loss for value function
+            MSE loss for value function
         """
-        # Simple MSE loss (can add clipping if desired)
+        # simple MSE loss (can add clipping if desired)
         return F.mse_loss(predicted_values, returns)

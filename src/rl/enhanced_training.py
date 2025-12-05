@@ -1,13 +1,13 @@
 """
 Enhanced PPO training with logging, checkpointing, and evaluation.
 
-===== MAJOR IMPROVEMENTS FROM ORIGINAL =====
-1. Structured configuration with PPOConfig
-2. Proper logging to CSV and TensorBoard
-3. Model checkpointing (save/load)
-4. Separate evaluation episodes
-5. Train/eval layout splits
-6. Best model tracking
+Main improvements:
+- structured config with PPOConfig
+- proper logging to CSV and TensorBoard
+- model checkpointing (save/load)
+- separate evaluation episodes
+- train/eval layout splits
+- best model tracking
 """
 
 import sys, os
@@ -37,50 +37,48 @@ class EnhancedPPOTrainer:
     """
     Complete PPO trainer with all production features.
     
-    ===== IMPROVEMENTS OVER ORIGINAL =====
-    1. Uses PPOConfig for all hyperparameters
-    2. Tracks best model with checkpointing
-    3. Separate train/eval layout splits
-    4. Proper logging infrastructure
-    5. Evaluation mode with deterministic actions
+    Improvements:
+    - uses PPOConfig for all hyperparameters
+    - tracks best model with checkpointing
+    - separate train/eval layout splits
+    - proper logging infrastructure
+    - evaluation mode with deterministic actions
     """
     
     def __init__(self, config: PPOConfig):
         """
         Initialize trainer with structured config.
-        
-        ===== CHANGE 5: Config-driven initialization =====
-        All hyperparameters now come from PPOConfig.
+        All hyperparameters come from PPOConfig.
         """
         self.config = config
         
-        # ===== GPU Setup for RTX 5090 =====
+        # GPU setup for RTX 5090
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         if torch.cuda.is_available():
             print(f"Using GPU: {torch.cuda.get_device_name(0)}")
             print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
             # RTX 5090 optimizations
-            torch.backends.cudnn.benchmark = True  # Auto-tune convolution algorithms
-            torch.backends.cuda.matmul.allow_tf32 = True  # Enable TF32 for faster matmul
+            torch.backends.cudnn.benchmark = True  # auto-tune convolution algorithms
+            torch.backends.cuda.matmul.allow_tf32 = True  # enable TF32 for faster matmul
             torch.backends.cudnn.allow_tf32 = True
         else:
             print("WARNING: CUDA not available, running on CPU")
         
-        # Mixed precision training scaler for RTX 5090
+        # mixed precision training scaler for RTX 5090
         self.use_amp = torch.cuda.is_available()
         self.scaler = GradScaler() if self.use_amp else None
         
-        # Set random seeds for reproducibility
+        # set random seeds for reproducibility
         self._set_seeds(config.seed)
         
-        # ===== Initialize networks =====
+        # initialize networks
         self.policy = Policy(
             num_agents=config.num_agents,
             max_actions=config.max_actions
         ).to(self.device)
         self.value = Value(num_agents=config.num_agents).to(self.device)
         
-        # ===== Optimizers =====
+        # optimizers
         self.policy_optimizer = optim.Adam(
             self.policy.parameters(),
             lr=config.lr_policy
@@ -90,42 +88,42 @@ class EnhancedPPOTrainer:
             lr=config.lr_value
         )
         
-        # ===== Reward shaper =====
+        # reward shaper
         self.reward_shaper = RewardShaper.for_scenario(config.scenario)
         
-        # ===== Environment =====
+        # environment
         self.env = self._create_env(config.scenario)
-        # Ensure environment config has num_agents set
+        # ensure environment config has num_agents set
         self.env.config['num_agents'] = config.num_agents
-        # Initialize agents if not already done
+        # initialize agents if not already done
         self._ensure_agents_initialized()
         
-        # Verify agents were created
+        # verify agents were created
         if len(self.env.agents) != config.num_agents:
             raise RuntimeError(
                 f"Failed to initialize agents. Expected {config.num_agents}, got {len(self.env.agents)}. "
                 f"Agents: {list(self.env.agents.keys())}"
             )
         
-        # ===== CHANGE 6: Train/eval layout splits =====
-        # Generate layout seeds for train/eval separation
+        # train/eval layout splits
+        # generate layout seeds for train/eval separation
         self.train_layout_seeds = list(range(1000, 1000 + config.num_train_layouts))
         self.eval_layout_seeds = list(range(2000, 2000 + config.num_eval_layouts))
         random.shuffle(self.train_layout_seeds)
         
-        # ===== CHANGE 7: Logging infrastructure =====
+        # logging infrastructure
         self.logger = ExperimentLogger(
             log_dir="logs",
             experiment_name=config.experiment_name,
             use_tensorboard=config.use_tensorboard
         )
         
-        # ===== CHANGE 8: Best model tracking =====
+        # best model tracking
         self.best_eval_return = float('-inf')
         self.checkpoint_dir = os.path.join(self.logger.exp_dir, "checkpoints")
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         
-        # Save config
+        # save config
         config.save(os.path.join(self.logger.exp_dir, "config.json"))
         
         print(f"Initialized {config.scenario} trainer")
@@ -198,19 +196,18 @@ class EnhancedPPOTrainer:
         """
         Collect one rollout with optional layout randomization.
         
-        ===== CHANGE 9: Added layout seed parameter =====
-        Enables train/eval split and domain randomization.
+        Added layout seed parameter for train/eval split and domain randomization.
         
         Args:
-            num_steps: Maximum steps per episode
-            deterministic: If True, use greedy actions
-            layout_seed: Seed for environment reset (for reproducibility)
+            num_steps: max steps per episode
+            deterministic: if True, use greedy actions
+            layout_seed: seed for environment reset (for reproducibility)
         """
-        # Reset with specific seed
+        # reset with specific seed
         obs = self.env.reset(seed=layout_seed)
         self.reward_shaper.reset()
         
-        # Storage
+        # storage
         observations = []
         agent_indices_list = []
         actions_list = []
@@ -218,13 +215,13 @@ class EnhancedPPOTrainer:
         rewards_list = []
         dones_list = []
         values_list = []
-        valid_actions_list_per_step = []  # Store valid actions for each step
+        valid_actions_list_per_step = []  # store valid actions for each step
         
         done = False
         step = 0
         
         while not done and step < num_steps:
-            # Get agent positions (create directly on GPU)
+            # get agent positions (create directly on GPU)
             agent_idx_temp = []
             for i in range(self.config.num_agents):
                 idx = self.env.get_agent_node_index(i)
@@ -237,23 +234,23 @@ class EnhancedPPOTrainer:
                 agent_idx_temp.append(idx)
             agent_indices = torch.tensor(agent_idx_temp, dtype=torch.long, device=self.device)
             
-            # Get valid actions
+            # get valid actions
             valid_actions_list = [
                 self.env.get_valid_actions(i)
                 for i in range(self.config.num_agents)
             ]
             
-            # Move observation to GPU once
+            # move observation to GPU once
             obs_gpu = obs.to(self.device) if hasattr(obs, 'to') else obs
             
-            # Select actions and get value in single inference (reduce overhead)
+            # select actions and get value in single inference (reduce overhead)
             with torch.no_grad():
                 actions, log_probs, action_probs = self.policy.select_actions(
                     obs_gpu, agent_indices, valid_actions_list, deterministic
                 )
                 values = self.value(obs_gpu, agent_indices)
             
-            # Convert to env format
+            # convert to env format
             action_dict = {}
             for i in range(self.config.num_agents):
                 action_idx = actions[i].item()
@@ -263,12 +260,12 @@ class EnhancedPPOTrainer:
                 )
                 action_dict[i] = action_str
             
-            # Execute
+            # execute
             obs_next, _, done, info = self.env.do_action(action_dict)
             
-            # Compute reward (pass actions for ImprovedRewardShaper compatibility)
+            # compute reward (pass actions for ImprovedRewardShaper compatibility)
             if hasattr(self.reward_shaper, 'compute_reward'):
-                # Check if compute_reward accepts actions parameter
+                # check if compute_reward accepts actions parameter
                 import inspect
                 sig = inspect.signature(self.reward_shaper.compute_reward)
                 if 'actions' in sig.parameters:
@@ -278,15 +275,15 @@ class EnhancedPPOTrainer:
             else:
                 reward = 0.0
             
-            # Store (ensure agent_indices is detached and remains a tensor)
+            # store (ensure agent_indices is detached and remains a tensor)
             observations.append(obs)
-            agent_indices_list.append(agent_indices.detach().cpu())  # Store on CPU to save GPU memory
+            agent_indices_list.append(agent_indices.detach().cpu())  # store on CPU to save GPU memory
             actions_list.append(actions)
             log_probs_list.append(log_probs)
             rewards_list.append(torch.tensor(reward, device=self.device))
             dones_list.append(torch.tensor(float(done), device=self.device))
             values_list.append(values)
-            valid_actions_list_per_step.append(valid_actions_list)  # Store for later
+            valid_actions_list_per_step.append(valid_actions_list)  # store for later
             
             obs = obs_next
             step += 1
@@ -340,37 +337,35 @@ class EnhancedPPOTrainer:
         """
         Collect multiple rollouts and aggregate them into batched data.
         
-        ===== NEW METHOD: Batch rollout collection =====
         Collects K complete episodes sequentially and stacks all transitions
         for efficient batched policy updates.
         
         Args:
-            num_rollouts: Number of complete episodes to collect
-            num_steps: Max steps per episode
-            deterministic: If True, use greedy actions
-            layout_seeds: List of seeds for environment randomization
-                         If None, samples randomly
+            num_rollouts: number of complete episodes to collect
+            num_steps: max steps per episode
+            deterministic: if True, use greedy actions
+            layout_seeds: list of seeds for environment randomization
+                          if None, samples randomly
             
         Returns:
-            batch: Aggregated data from all rollouts
-                Contains:
-                - observations: List of observations across all episodes
-                - agent_indices: List of agent index tensors
-                - actions: All actions stacked [total_steps, num_agents]
-                - log_probs: Log probabilities [total_steps, num_agents]
-                - rewards: Rewards [total_steps]
-                - dones: Done flags [total_steps]
-                - values: Value estimates [total_steps, num_agents]
+            batch with aggregated data:
+                - observations: list of observations across all episodes
+                - agent_indices: list of agent index tensors
+                - actions: all actions stacked [total_steps, num_agents]
+                - log_probs: log probabilities [total_steps, num_agents]
+                - rewards: rewards [total_steps]
+                - dones: done flags [total_steps]
+                - values: value estimates [total_steps, num_agents]
                 - advantages: GAE advantages [total_steps]
-                - returns: Returns [total_steps]
-                - episode_returns: List of return per episode
-                - episode_stats: List of stats per episode
+                - returns: returns [total_steps]
+                - episode_returns: list of return per episode
+                - episode_stats: list of stats per episode
         """
-        # Generate or use provided seeds
+        # generate or use provided seeds
         if layout_seeds is None:
             layout_seeds = [random.choice(self.train_layout_seeds) for _ in range(num_rollouts)]
         
-        # Collect all rollouts
+        # collect all rollouts
         all_observations = []
         all_agent_indices = []
         all_actions = []
@@ -381,8 +376,8 @@ class EnhancedPPOTrainer:
         all_final_values = []
         all_episode_returns = []
         all_episode_stats = []
-        all_valid_actions = []  # NEW: collect valid actions per step
-        episode_step_boundaries = [0]  # For tracking episode boundaries
+        all_valid_actions = []  # collect valid actions per step
+        episode_step_boundaries = [0]  # for tracking episode boundaries
         
         for ep in range(num_rollouts):
             rollout = self.collect_rollout(
@@ -403,22 +398,22 @@ class EnhancedPPOTrainer:
             all_episode_returns.append(rollout['episode_return'])
             all_episode_stats.append(rollout['episode_stats'])
             
-            # Collect valid actions if available
+            # collect valid actions if available
             if 'valid_actions_per_step' in rollout and rollout['valid_actions_per_step']:
                 all_valid_actions.extend(rollout['valid_actions_per_step'])
             
-            # Track episode boundaries for advantage computation
+            # track episode boundaries for advantage computation
             episode_step_boundaries.append(episode_step_boundaries[-1] + len(rollout['observations']))
         
-        # Stack all tensors
+        # stack all tensors
         actions_all = torch.cat(all_actions, dim=0)  # [total_steps, num_agents]
         log_probs_all = torch.cat(all_log_probs, dim=0)  # [total_steps, num_agents]
         rewards_all = torch.cat(all_rewards, dim=0)  # [total_steps]
         dones_all = torch.cat(all_dones, dim=0)  # [total_steps]
         values_all = torch.cat(all_values, dim=0)  # [total_steps, num_agents] or [total_steps*num_agents]
         
-        # Compute advantages across all episodes
-        # Need to handle each episode separately for GAE
+        # compute advantages across all episodes
+        # need to handle each episode separately for GAE
         all_advantages = []
         all_returns = []
         
@@ -429,17 +424,17 @@ class EnhancedPPOTrainer:
             ep_rewards = rewards_all[start_idx:end_idx]
             ep_dones = dones_all[start_idx:end_idx]
             
-            # Get values for this episode
+            # get values for this episode
             T_ep = end_idx - start_idx
             if values_all.dim() == 2:  # [total_steps, num_agents]
-                ep_values = values_all[start_idx:end_idx].mean(dim=1)  # Average across agents
+                ep_values = values_all[start_idx:end_idx].mean(dim=1)  # average across agents
             else:  # [total_steps * num_agents]
                 ep_values = values_all[start_idx*self.config.num_agents:(end_idx)*self.config.num_agents]
                 ep_values = ep_values.view(T_ep, self.config.num_agents).mean(dim=1)
             
             final_value = all_final_values[ep_idx].mean()
             
-            # Compute GAE for this episode
+            # compute GAE for this episode
             values_with_bootstrap = torch.cat([ep_values, final_value.unsqueeze(0)])
             ep_advantages = Policy.gae(
                 ep_rewards, ep_dones, values_with_bootstrap,
