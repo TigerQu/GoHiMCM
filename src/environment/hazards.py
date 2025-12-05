@@ -151,9 +151,10 @@ def degrade_health(
         # Guard: check that node_id is valid
         if person.node_id not in nodes:
             if verbose:
-                print(f"[T={time_step}] Warning: Person {person.pid} has invalid node_id: {person.node_id}")
+                # Debug: print(f"[T={time_step}] Warning: Person {person.pid} has invalid node_id: {person.node_id}")
+                pass
             continue
-
+        
         node = nodes[person.node_id]
         
         # NEW: Determine vulnerability multiplier based on mobility
@@ -177,4 +178,5 @@ def degrade_health(
         if hp_loss > 0:
             person.hp = max(0.0, person.hp - hp_loss)
             if verbose and not person.is_alive:
-                print(f"[T={time_step}] Person {person.pid} (mobility={person.mobility}) died at {person.node_id}")
+                # Debug: print(f"[T={time_step}] Person {person.pid} (mobility={person.mobility}) died at {person.node_id}")
+                pass

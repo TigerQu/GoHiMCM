@@ -275,14 +275,14 @@ class TimeSeriesAnalyzer:
                             people_in_smoke += 1
             
             # Log timestep
-            log['t'].append(stats['time_step'])
-            log['fraction_rooms_swept'].append(stats['nodes_swept'] / max(total_rooms, 1))
-            log['people_alive'].append(stats['people_alive'])
+            log['t'].append(stats.get('time_step', step))
+            log['fraction_rooms_swept'].append(stats.get('nodes_swept', 0) / max(total_rooms, 1))
+            log['people_alive'].append(stats.get('people_alive', 0))
             log['people_in_fire'].append(people_in_fire)
             log['people_in_smoke'].append(people_in_smoke)
-            log['people_rescued'].append(stats['people_rescued'])
-            log['high_risk_redundancy'].append(stats['high_risk_redundancy'])
-            log['active_agents'].append(stats['active_agents'])
+            log['people_rescued'].append(stats.get('people_rescued', 0))
+            log['high_risk_redundancy'].append(stats.get('high_risk_redundancy', 0.0))
+            log['active_agents'].append(stats.get('active_agents', trainer.config.num_agents))
             
             step += 1
         
@@ -290,13 +290,70 @@ class TimeSeriesAnalyzer:
     
     
     @staticmethod
+    def plot_time_series_simple(
+        log: Dict[str, List],
+        save_path: str = "time_series_simple.png",
+        title: str = "Sweep Progress vs Hazard Exposure"
+    ):
+        """
+        Simple 3-line time series plot showing relationship between sweep progress and hazard victims.
+        
+        Args:
+            log: Time series data from run_diagnostic_episode
+            save_path: Where to save figure
+            title: Plot title
+        """
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+        
+        t = log['t']
+        total_people = max(log['people_alive']) if log['people_alive'] else 1
+        
+        # Calculate people in hazard (fire + smoke)
+        people_in_hazard = [f + s for f, s in zip(log['people_in_fire'], log['people_in_smoke'])]
+        
+        # Normalize civilians alive to 0-1 scale
+        civilians_alive_normalized = [p / total_people for p in log['people_alive']]
+        civilians_in_hazard_normalized = [p / total_people for p in people_in_hazard]
+        
+        # Plot 3 lines
+        ax.plot(t, log['fraction_rooms_swept'], linewidth=2.5, color='blue', 
+                label='Fraction of Rooms Swept', marker='o', markersize=4, alpha=0.8)
+        ax.plot(t, civilians_alive_normalized, linewidth=2.5, color='green', 
+                label='Civilians Alive (normalized)', marker='s', markersize=4, alpha=0.8)
+        ax.plot(t, civilians_in_hazard_normalized, linewidth=2.5, color='red', 
+                label='Civilians in Hazard (normalized)', marker='^', markersize=4, alpha=0.8)
+        
+        ax.set_xlabel('Time (steps)', fontsize=12)
+        ax.set_ylabel('Fraction / Normalized Count', fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_ylim([-0.05, 1.05])
+        ax.legend(loc='best', fontsize=10, framealpha=0.9)
+        ax.grid(True, alpha=0.3, linestyle='--')
+        
+        # Add annotation showing the relationship
+        if len(t) > 10:
+            mid_idx = len(t) // 2
+            ax.annotate('As sweep progresses →\nHazard victims decrease',
+                       xy=(t[mid_idx], civilians_in_hazard_normalized[mid_idx]),
+                       xytext=(t[mid_idx] + 5, civilians_in_hazard_normalized[mid_idx] + 0.2),
+                       arrowprops=dict(arrowstyle='->', color='red', lw=1.5),
+                       fontsize=9, color='darkred', fontweight='bold',
+                       bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7))
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"✓ Simple time series plot saved to: {save_path}")
+    
+    
     def plot_time_series(
         log: Dict[str, List],
         save_path: str = "time_series.png",
         title: str = "Episode Dynamics"
     ):
         """
-        Plot time series of key metrics.
+        Plot time series of key metrics (4-panel detailed view).
         
         Args:
             log: Time series data from run_diagnostic_episode
@@ -348,7 +405,7 @@ class TimeSeriesAnalyzer:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
         
-        print(f" Time series plot saved to: {save_path}")
+        print(f"✓ Detailed time series plot saved to: {save_path}")
 
 
 def analyze_trained_model(checkpoint_path: str, scenario: str = "office"):
@@ -378,7 +435,14 @@ def analyze_trained_model(checkpoint_path: str, scenario: str = "office"):
     print("Running diagnostic episode...")
     log = TimeSeriesAnalyzer.run_diagnostic_episode(trainer)
     
-    # 2. Plot time series
+    # 2. Plot time series (simple 3-line version for paper)
+    TimeSeriesAnalyzer.plot_time_series_simple(
+        log,
+        save_path=f"{analysis_dir}/time_series_simple_{scenario}.png",
+        title=f"{scenario.capitalize()}: Sweep Progress vs Hazard Exposure"
+    )
+    
+    # 3. Plot detailed time series (4-panel version)
     TimeSeriesAnalyzer.plot_time_series(
         log,
         save_path=os.path.join(analysis_dir, f"{scenario}_time_series.png"),

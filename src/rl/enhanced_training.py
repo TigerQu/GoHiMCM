@@ -95,6 +95,17 @@ class EnhancedPPOTrainer:
         
         # ===== Environment =====
         self.env = self._create_env(config.scenario)
+        # Ensure environment config has num_agents set
+        self.env.config['num_agents'] = config.num_agents
+        # Initialize agents if not already done
+        self._ensure_agents_initialized()
+        
+        # Verify agents were created
+        if len(self.env.agents) != config.num_agents:
+            raise RuntimeError(
+                f"Failed to initialize agents. Expected {config.num_agents}, got {len(self.env.agents)}. "
+                f"Agents: {list(self.env.agents.keys())}"
+            )
         
         # ===== CHANGE 6: Train/eval layout splits =====
         # Generate layout seeds for train/eval separation
@@ -144,6 +155,40 @@ class EnhancedPPOTrainer:
             raise ValueError(f"Unknown scenario: {scenario}")
     
     
+    def _ensure_agents_initialized(self):
+        """Ensure all agents are initialized in the environment."""
+        # Check if we have the right number of agents
+        current_agents = len(self.env.agents)
+        required_agents = self.config.num_agents
+        
+        if current_agents != required_agents:
+            # Clear existing agents and reinitialize
+            self.env.agents.clear()
+            self.env._initial_agent_positions.clear()
+            
+            # Get exit nodes based on scenario
+            if self.config.scenario == "office":
+                exits = ["EXIT_LEFT", "EXIT_RIGHT"]
+            elif self.config.scenario == "daycare":
+                exits = ["EXIT_G_LEFT", "EXIT_G_RIGHT"]
+            elif self.config.scenario == "warehouse":
+                exits = ["EXIT_WH_LEFT", "EXIT_WH_RIGHT"]  # Warehouse-specific exits
+            else:
+                exits = ["EXIT_LEFT", "EXIT_RIGHT"]
+            
+            # Place agents at exits (distribute evenly)
+            for agent_id in range(required_agents):
+                exit_node = exits[agent_id % len(exits)]
+                if exit_node in self.env.nodes:
+                    self.env.place_agent(agent_id=agent_id, node_id=exit_node)
+                else:
+                    # Fallback: place at first available exit
+                    for exit_candidate in exits:
+                        if exit_candidate in self.env.nodes:
+                            self.env.place_agent(agent_id=agent_id, node_id=exit_candidate)
+                            break
+    
+    
     def collect_rollout(
         self,
         num_steps: int,
@@ -180,10 +225,17 @@ class EnhancedPPOTrainer:
         
         while not done and step < num_steps:
             # Get agent positions (create directly on GPU)
-            agent_indices = torch.tensor([
-                self.env.get_agent_node_index(i)
-                for i in range(self.config.num_agents)
-            ], device=self.device)
+            agent_idx_temp = []
+            for i in range(self.config.num_agents):
+                idx = self.env.get_agent_node_index(i)
+                if idx is None:
+                    raise RuntimeError(
+                        f"Agent {i} not found in environment or has invalid position. "
+                        f"Agents in env: {list(self.env.agents.keys())}, "
+                        f"Agent positions: {[(aid, a.node_id) for aid, a in self.env.agents.items()]}"
+                    )
+                agent_idx_temp.append(idx)
+            agent_indices = torch.tensor(agent_idx_temp, dtype=torch.long, device=self.device)
             
             # Get valid actions
             valid_actions_list = [
@@ -226,9 +278,9 @@ class EnhancedPPOTrainer:
             else:
                 reward = 0.0
             
-            # Store
+            # Store (ensure agent_indices is detached and remains a tensor)
             observations.append(obs)
-            agent_indices_list.append(agent_indices)
+            agent_indices_list.append(agent_indices.detach().cpu())  # Store on CPU to save GPU memory
             actions_list.append(actions)
             log_probs_list.append(log_probs)
             rewards_list.append(torch.tensor(reward, device=self.device))
@@ -240,13 +292,24 @@ class EnhancedPPOTrainer:
             step += 1
         
         # Bootstrap value
-        agent_indices = torch.tensor([
-            self.env.get_agent_node_index(i)
-            for i in range(self.config.num_agents)
-        ], device=self.device)
+        agent_idx_temp_final = []
+        for i in range(self.config.num_agents):
+            idx = self.env.get_agent_node_index(i)
+            if idx is None:
+                # Use last known position or default to 0
+                if agent_indices_list and len(agent_indices_list) > 0:
+                    last_indices = agent_indices_list[-1]
+                    if isinstance(last_indices, torch.Tensor):
+                        idx = last_indices[i].item() if i < len(last_indices) else 0
+                    else:
+                        idx = last_indices[i] if i < len(last_indices) else 0
+                else:
+                    idx = 0
+            agent_idx_temp_final.append(idx)
+        agent_indices_final = torch.tensor(agent_idx_temp_final, dtype=torch.long, device=self.device)
         with torch.no_grad():
             obs_gpu = obs.to(self.device) if hasattr(obs, 'to') else obs
-            final_value = self.value(obs_gpu, agent_indices)
+            final_value = self.value(obs_gpu, agent_indices_final)
         
         # Get episode summary
         episode_stats = self.reward_shaper.get_episode_summary(self.env)
@@ -318,6 +381,7 @@ class EnhancedPPOTrainer:
         all_final_values = []
         all_episode_returns = []
         all_episode_stats = []
+        all_valid_actions = []  # NEW: collect valid actions per step
         episode_step_boundaries = [0]  # For tracking episode boundaries
         
         for ep in range(num_rollouts):
@@ -338,6 +402,10 @@ class EnhancedPPOTrainer:
             all_final_values.append(rollout['final_value'])
             all_episode_returns.append(rollout['episode_return'])
             all_episode_stats.append(rollout['episode_stats'])
+            
+            # Collect valid actions if available
+            if 'valid_actions_per_step' in rollout and rollout['valid_actions_per_step']:
+                all_valid_actions.extend(rollout['valid_actions_per_step'])
             
             # Track episode boundaries for advantage computation
             episode_step_boundaries.append(episode_step_boundaries[-1] + len(rollout['observations']))
@@ -404,6 +472,7 @@ class EnhancedPPOTrainer:
             'episode_stats': all_episode_stats,
             'num_episodes': num_rollouts,
             'num_transitions': actions_all.size(0),
+            'valid_actions_per_step': all_valid_actions if all_valid_actions else None,  # NEW
         }
     
     
@@ -479,6 +548,10 @@ class EnhancedPPOTrainer:
         
         for agent_id in range(self.config.num_agents):
             node_idx = self.env.get_agent_node_index(agent_id)
+            if node_idx is None:
+                print(f"\n  Agent {agent_id}:")
+                print(f"    ERROR: Agent not found or has invalid position")
+                continue
             node_name = list(self.env.node_to_idx.keys())[node_idx] if hasattr(self.env, 'node_to_idx') else f"Node_{node_idx}"
             
             # Get agent position history
@@ -704,7 +777,15 @@ class EnhancedPPOTrainer:
             
             for t in range(T):
                 obs = observations[t]
-                agent_indices = agent_indices_list[t]
+                agent_indices_raw = agent_indices_list[t]
+                
+                # Ensure agent_indices is a proper tensor on the correct device
+                if isinstance(agent_indices_raw, torch.Tensor):
+                    agent_indices = agent_indices_raw.to(self.device)
+                elif isinstance(agent_indices_raw, list):
+                    agent_indices = torch.tensor(agent_indices_raw, device=self.device)
+                else:
+                    raise TypeError(f"agent_indices_list[{t}] has unexpected type: {type(agent_indices_raw)}")
                 
                 # Move observation to GPU
                 obs_gpu = obs.to(self.device) if hasattr(obs, 'to') else obs
@@ -1034,11 +1115,9 @@ class EnhancedPPOTrainer:
                         # Simple progress print (detailed metrics in CSV)
                         coverage = avg_stats.get('nodes_swept', 0)
                         rescued = avg_stats.get('people_rescued', 0)
-                        loops = avg_stats.get('loop_detections', 0)
                         p_loss = losses['policy_loss']
                         v_loss = losses['value_loss']
-                        print(f"{iteration:5d} | {avg_return:7.1f} | {coverage:8.1f} | {rescued:7.1f} | "
-                              f"P_loss:{p_loss:6.3f} V_loss:{v_loss:6.3f}")
+                        print(f"{iteration:5d} | {avg_return:7.1f} | {coverage:8.0f} | {rescued:7.0f} | {p_loss:7.4f} {v_loss:7.4f}")
                 else:
                     # Original single rollout per iteration
                     layout_seed = random.choice(self.train_layout_seeds)
@@ -1079,11 +1158,9 @@ class EnhancedPPOTrainer:
                         # Simple progress print (detailed metrics in CSV)
                         coverage = rollout['episode_stats'].get('nodes_swept', 0)
                         rescued = rollout['episode_stats'].get('people_rescued', 0)
-                        loops = rollout['episode_stats'].get('loop_detections', 0)
                         p_loss = losses['policy_loss']
                         v_loss = losses['value_loss']
-                        print(f"{iteration:5d} | {rollout['episode_return']:7.1f} | {coverage:8d} | {rescued:7d} | "
-                              f"P_loss:{p_loss:6.3f} V_loss:{v_loss:6.3f}")
+                        print(f"{iteration:5d} | {rollout['episode_return']:7.1f} | {coverage:8d} | {rescued:7d} | {p_loss:7.4f} {v_loss:7.4f}")
                 
                 # Evaluate and checkpoint
                 if (iteration + 1) % self.config.eval_interval == 0:

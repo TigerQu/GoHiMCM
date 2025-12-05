@@ -43,9 +43,9 @@ class Policy(nn.Module):
         
         # ===== CHANGE 2: Fixed input dimension to match GAT output =====
         # GAT outputs 48-dim embeddings per node (updated for RTX 5090)
-        # We concatenate: [agent_node_embedding (48) + global_embedding (48)] = 96
+        # We concatenate: [agent_node_embedding (48) + global_embedding (48) + agent_id_onehot (num_agents)] 
         self.agent_feature_dim = 48  # From GAT output (increased from 24)
-        self.input_dim = self.agent_feature_dim * 2  # Agent + global = 96
+        self.input_dim = self.agent_feature_dim * 2 + num_agents  # Agent + global + ID = 96 + num_agents
         
         # ===== CHANGE 3: Output dimension matches action space =====
         # Actions: 0=wait, 1=search, 2...k=move_neighbor_i
@@ -104,16 +104,21 @@ class Policy(nn.Module):
         global_embedding = self.gat.get_global_embedding(node_embeddings)  # [48]
         
         # Extract agent-specific features
-        # For each agent, get their node's embedding + global context
+        # For each agent, get their node's embedding + global context + agent ID
         agent_features = []
         for i in range(self.num_agents):
             agent_idx = agent_node_indices[i]
             agent_node_emb = node_embeddings[agent_idx]  # [48]
-            # Concatenate agent's local view with global context
-            agent_feat = torch.cat([agent_node_emb, global_embedding], dim=-1)  # [96]
+            
+            # Create one-hot agent ID to differentiate agents
+            agent_id_onehot = torch.zeros(self.num_agents, device=node_embeddings.device)
+            agent_id_onehot[i] = 1.0
+            
+            # Concatenate agent's local view with global context and agent ID
+            agent_feat = torch.cat([agent_node_emb, global_embedding, agent_id_onehot], dim=-1)  # [96 + num_agents]
             agent_features.append(agent_feat)
         
-        agent_features = torch.stack(agent_features)  # [num_agents, 96]
+        agent_features = torch.stack(agent_features)  # [num_agents, 96 + num_agents]
         
         # ===== Step 4: Compute action logits for each agent =====
         action_logits = self.action_head(agent_features)  # [num_agents, max_actions]
@@ -170,11 +175,15 @@ class Policy(nn.Module):
             # Get global context from full critic state
             critic_global = self.gat.get_global_embedding(critic_node_embeddings)
             
-            # Concatenate local actor view with global critic context
-            agent_feat = torch.cat([agent_node_emb, critic_global], dim=-1)  # [96]
+            # Create one-hot agent ID to differentiate agents
+            agent_id_onehot = torch.zeros(self.num_agents, device=critic_node_embeddings.device)
+            agent_id_onehot[i] = 1.0
+            
+            # Concatenate local actor view with global critic context and agent ID
+            agent_feat = torch.cat([agent_node_emb, critic_global, agent_id_onehot], dim=-1)  # [96 + num_agents]
             agent_features.append(agent_feat)
         
-        agent_features = torch.stack(agent_features)  # [num_agents, 96]
+        agent_features = torch.stack(agent_features)  # [num_agents, 96 + num_agents]
         action_logits = self.action_head(agent_features)  # [num_agents, max_actions]
         
         return action_logits, critic_node_embeddings, actor_node_embeddings_list
@@ -403,8 +412,8 @@ class Value(nn.Module):
         self.gat = GAT()
         
         # ===== CHANGE 7: Fixed input dimension =====
-        # Same as policy: agent_embedding (48) + global_embedding (48) = 96
-        self.input_dim = 96  # Updated from 48
+        # Same as policy: agent_embedding (48) + global_embedding (48) + agent_id (num_agents) = 96 + num_agents
+        self.input_dim = 96 + num_agents
         
         # Value head outputs single scalar value
         # Larger network for RTX 5090
@@ -457,13 +466,19 @@ class Value(nn.Module):
             for i in range(self.num_agents):
                 agent_idx = agent_node_indices[i]
                 agent_node_emb = node_embeddings[agent_idx]
-                agent_feat = torch.cat([agent_node_emb, global_embedding], dim=-1)  # [96]
+                
+                # Add agent ID one-hot encoding (same as policy)
+                agent_id_onehot = torch.zeros(self.num_agents, device=agent_node_emb.device)
+                agent_id_onehot[i] = 1.0
+                
+                agent_feat = torch.cat([agent_node_emb, global_embedding, agent_id_onehot], dim=-1)  # [96 + num_agents]
                 value = self.value_head(agent_feat)  # [1]
                 values.append(value)
             return torch.cat(values)  # [num_agents]
         else:
-            # Global value (pooled state only)
-            global_feat = torch.cat([global_embedding, global_embedding], dim=-1)  # [96]
+            # Global value (pooled state only) - add zero padding for agent ID
+            agent_id_padding = torch.zeros(self.num_agents, device=global_embedding.device)
+            global_feat = torch.cat([global_embedding, global_embedding, agent_id_padding], dim=-1)  # [96 + num_agents]
             return self.value_head(global_feat)  # [1]
     
     
@@ -498,7 +513,12 @@ class Value(nn.Module):
         for i in range(self.num_agents):
             agent_idx = agent_node_indices[i]
             agent_node_emb = node_embeddings[agent_idx]
-            agent_feat = torch.cat([agent_node_emb, global_embedding], dim=-1)  # [96]
+            
+            # Add agent ID one-hot encoding (same as policy)
+            agent_id_onehot = torch.zeros(self.num_agents, device=agent_node_emb.device)
+            agent_id_onehot[i] = 1.0
+            
+            agent_feat = torch.cat([agent_node_emb, global_embedding, agent_id_onehot], dim=-1)  # [96 + num_agents]
             value = self.value_head(agent_feat)  # [1]
             values.append(value)
         

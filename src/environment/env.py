@@ -83,6 +83,10 @@ class BuildingFireEnvironment:
         self._agent_entered_room: Dict[int, Optional[str]] = {}  # Track if just entered room
         self._first_visit_nodes: Set[str] = set()  # Track first-visit coverage
         
+        # Per-agent statistics tracking
+        self._agent_nodes_visited: Dict[int, Set[str]] = {}  # Unique nodes per agent
+        self._agent_people_rescued: Dict[int, int] = {}      # Rescues per agent
+        
         # For reset
         self._initial_agent_positions: Dict[int, str] = {}
         self._initial_people_state: List[Tuple[str, int, str, float]] = []
@@ -286,6 +290,10 @@ class BuildingFireEnvironment:
             "total_search_time": 0,
         }
         
+        # Reset per-agent statistics
+        self._agent_nodes_visited = {i: set() for i in self.agents.keys()}
+        self._agent_people_rescued = {i: 0 for i in self.agents.keys()}
+        
         # Reset reward tracking
         self._last_people_found = 0
         self._last_nodes_swept = 0
@@ -447,7 +455,7 @@ class BuildingFireEnvironment:
                         # Only mask if not in hazard (allow escape)
                         if not (current_node.on_fire or current_node.smoky):
                             valid_actions.remove(back_move)
-                            print(f"[ANTI-THRASH] Agent {agent_id} committed to room {current}, masked {back_move}")
+                            # Debug: print(f"[ANTI-THRASH] Agent {agent_id} committed to room {current}, masked {back_move}")
         
         # Always include wait as an option
         valid_actions.append("wait")
@@ -580,6 +588,11 @@ class BuildingFireEnvironment:
         agent.searching = False  # Stop any ongoing search
         agent.search_timer = 0
         
+        # Track node visit for this agent
+        if agent_id not in self._agent_nodes_visited:
+            self._agent_nodes_visited[agent_id] = set()
+        self._agent_nodes_visited[agent_id].add(target_node_id)
+        
         self._update_agent_positions()
         self._maybe_auto_sweep_current_node(self.nodes[target_node_id])
         return True
@@ -678,6 +691,10 @@ class BuildingFireEnvironment:
                         if person.is_alive and not person.rescued:
                             person.rescued = True
                             self.stats["people_rescued"] += 1
+                            # Track which agent rescued this person
+                            if agent.agent_id not in self._agent_people_rescued:
+                                self._agent_people_rescued[agent.agent_id] = 0
+                            self._agent_people_rescued[agent.agent_id] += 1
 
     
     # Oberservation and feature extraction
@@ -1043,6 +1060,8 @@ class BuildingFireEnvironment:
             - total_search_time: Total time spent searching
             - time_step: Current time step
             - sweep_complete: Whether sweep is done
+            - agent_X_nodes_visited: Unique nodes visited by agent X
+            - agent_X_people_rescued: People rescued by agent X
         """
         stats = {
             **self.stats,
@@ -1051,6 +1070,12 @@ class BuildingFireEnvironment:
             "total_people": len(self.people),
             "people_alive": sum(1 for p in self.people.values() if p.is_alive),
         }
+        
+        # Add per-agent statistics
+        for agent_id in self.agents.keys():
+            stats[f'agent_{agent_id}_nodes_visited'] = len(self._agent_nodes_visited.get(agent_id, set()))
+            stats[f'agent_{agent_id}_people_rescued'] = self._agent_people_rescued.get(agent_id, 0)
+        
         return stats
     
     

@@ -114,9 +114,16 @@ def build_standard_office_layout() -> BuildingFireEnvironment:
     env.spawn_person("RB1", age=32, mobility="adult", hp=100.0)
     env.spawn_person("RB1", age=41, mobility="adult", hp=97.0)
     
-    # Place agents at exits
-    env.place_agent(agent_id=0, node_id="EXIT_LEFT")
-    env.place_agent(agent_id=1, node_id="EXIT_RIGHT")
+    # Place agents at exits (distribute evenly)
+    # Get all exit nodes
+    exits = ["EXIT_LEFT", "EXIT_RIGHT"]
+    
+    # If more than 2 agents, distribute them across available exits
+    # Extra agents will share exits (multiple agents can start at same exit)
+    num_agents = env.config.get("num_agents", 2)
+    for agent_id in range(num_agents):
+        exit_node = exits[agent_id % len(exits)]
+        env.place_agent(agent_id=agent_id, node_id=exit_node)
     
     return env
 
@@ -299,9 +306,12 @@ def build_babycare_layout() -> BuildingFireEnvironment:
             # Infant (child mobility - more vulnerable)
             env.spawn_person(f"F{f}_NUR{r}", age=1, mobility="child", hp=100.0)
 
-    # Place agents at ground-floor exits
-    env.place_agent(agent_id=0, node_id="EXIT_G_LEFT")
-    env.place_agent(agent_id=1, node_id="EXIT_G_RIGHT")
+    # Place agents at ground-floor exits (distribute evenly)
+    exits = ["EXIT_G_LEFT", "EXIT_G_RIGHT"]
+    num_agents = env.config.get("num_agents", 2)
+    for agent_id in range(num_agents):
+        exit_node = exits[agent_id % len(exits)]
+        env.place_agent(agent_id=agent_id, node_id=exit_node)
 
     return env
 
@@ -403,8 +413,11 @@ def build_two_floor_warehouse() -> BuildingFireEnvironment:
             rid = f"R_{r}_{c}"
             env.spawn_person(rid, age=35, mobility="adult", hp=100.0)
 
-    # Agents at warehouse exits
-    env.place_agent(0, "EXIT_WH_LEFT")
-    env.place_agent(1, "EXIT_WH_RIGHT")
+    # Agents at warehouse exits (distribute evenly)
+    exits = ["EXIT_WH_LEFT", "EXIT_WH_RIGHT"]
+    num_agents = env.config.get("num_agents", 2)
+    for agent_id in range(num_agents):
+        exit_node = exits[agent_id % len(exits)]
+        env.place_agent(agent_id, exit_node)
 
     return env

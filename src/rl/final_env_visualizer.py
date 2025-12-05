@@ -57,6 +57,10 @@ def plot_agent_trajectories(
     done = False
     step = 0
     
+    # Move observation to CPU for consistent device handling
+    if hasattr(obs, 'to'):
+        obs = obs.to('cpu')
+    
     while not done and step < max_steps:
         # Record agent positions
         for i in range(trainer.config.num_agents):
@@ -68,17 +72,24 @@ def plot_agent_trajectories(
         agent_indices = torch.tensor([
             env.get_agent_node_index(i)
             for i in range(trainer.config.num_agents)
-        ], device=trainer.device)
+        ])  # Keep on CPU
         valid_actions_list = [
             env.get_valid_actions(i)
             for i in range(trainer.config.num_agents)
         ]
         
-        # Select actions
+        # Select actions - handle device properly
         with torch.no_grad():
+            # Move to trainer's device temporarily
+            obs_device = obs.to(trainer.device) if hasattr(obs, 'to') else obs
+            agent_indices_device = agent_indices.to(trainer.device)
+            
             actions, _, _ = trainer.policy.select_actions(
-                obs, agent_indices, valid_actions_list, deterministic
+                obs_device, agent_indices_device, valid_actions_list, deterministic
             )
+            
+            # Move back to CPU
+            actions = actions.cpu()
         
         # Convert to action dict
         action_dict = {}
@@ -92,6 +103,8 @@ def plot_agent_trajectories(
         
         # Step environment
         obs, _, done, _ = env.do_action(action_dict)
+        if hasattr(obs, 'to'):
+            obs = obs.to('cpu')
         step += 1
     
     # Final stats
@@ -152,7 +165,7 @@ def _draw_trajectories(
         ax.text(x, y, label, ha='center', va='center', fontsize=7, fontweight='bold', zorder=4)
     
     # Draw edges (building connectivity)
-    for u_id, v_id in env.edges.keys():
+    for u_id, v_id in env.G.edges():
         if u_id in positions and v_id in positions:
             x1, y1 = positions[u_id]
             x2, y2 = positions[v_id]
@@ -163,18 +176,29 @@ def _draw_trajectories(
     for agent_id, path in agent_paths.items():
         color = colors[agent_id % len(colors)]
         
+        # Debug: Print agent path info
+        unique_nodes = len(set(path))
+        print(f"  Agent {agent_id}: {len(path)} steps, {unique_nodes} unique nodes, Path: {path[:10]}{'...' if len(path) > 10 else ''}")
+        
         # Draw path as connected arrows
         if len(path) > 1:
+            arrows_drawn = 0
             for i in range(len(path) - 1):
                 node1, node2 = path[i], path[i+1]
                 if node1 in positions and node2 in positions:
                     x1, y1 = positions[node1]
                     x2, y2 = positions[node2]
-                    ax.arrow(
-                        x1, y1, x2-x1, y2-y1,
-                        head_width=0.3, head_length=0.2,
-                        fc=color, ec=color, alpha=0.4, linewidth=2, zorder=2
-                    )
+                    # Only draw arrow if there's actual movement
+                    if node1 != node2:
+                        ax.arrow(
+                            x1, y1, x2-x1, y2-y1,
+                            head_width=0.3, head_length=0.2,
+                            fc=color, ec=color, alpha=0.4, linewidth=2, zorder=2
+                        )
+                        arrows_drawn += 1
+            print(f"    → Drew {arrows_drawn} arrows for Agent {agent_id}")
+        else:
+            print(f"    → Agent {agent_id} didn't move (only 1 position)")
         
         # Mark start and end
         if path:

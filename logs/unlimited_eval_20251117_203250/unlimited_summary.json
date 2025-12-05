@@ -1,0 +1,67 @@
+{
+  "avg_coverage": "8.2/27 (30.4%)",
+  "avg_rescued": "1.6/6",
+  "avg_steps": "203.7",
+  "episodes": [
+    {
+      "coverage": 10,
+      "rescued": 3,
+      "alive": 0,
+      "steps": 201
+    },
+    {
+      "coverage": 11,
+      "rescued": 3,
+      "alive": 0,
+      "steps": 209
+    },
+    {
+      "coverage": 11,
+      "rescued": 1,
+      "alive": 0,
+      "steps": 174
+    },
+    {
+      "coverage": 4,
+      "rescued": 1,
+      "alive": 0,
+      "steps": 202
+    },
+    {
+      "coverage": 5,
+      "rescued": 0,
+      "alive": 0,
+      "steps": 176
+    },
+    {
+      "coverage": 11,
+      "rescued": 3,
+      "alive": 0,
+      "steps": 257
+    },
+    {
+      "coverage": 4,
+      "rescued": 0,
+      "alive": 0,
+      "steps": 188
+    },
+    {
+      "coverage": 5,
+      "rescued": 0,
+      "alive": 0,
+      "steps": 190
+    },
+    {
+      "coverage": 12,
+      "rescued": 3,
+      "alive": 0,
+      "steps": 208
+    },
+    {
+      "coverage": 9,
+      "rescued": 2,
+      "alive": 0,
+      "steps": 232
+    }
+  ]
+}

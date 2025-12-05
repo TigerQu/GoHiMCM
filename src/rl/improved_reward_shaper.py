@@ -1,14 +1,22 @@
 """
-Improved reward shaping to fix pathological agent loops.
+Fixed Version
 
-===== KEY IMPROVEMENTS =====
-1. First-visit coverage bonus (no repeated reward for revisiting)
-2. Edge backtrack penalty (punish A↔B oscillation)
-3. Potential-based shaping toward unswept nodes (no reward cycles)
+BUG FIXES:
+1.  Backtrack penalty now only triggers on IMMEDIATE oscillation!!!!
+   - Changed from tracking list of recent edges to only last edge
+   - Prevents false positives on normal path planning (for example, from A to B to C to A is okay!)
+
+2. First-visit and coverage rewards are now MUTUALLY EXCLUSIVE
+   - First visit to room: +100 
+   - Revisit to room: +10 
+   - Prevents reward inflation and training instability
+
+FEATURES:
+1. first-visit coverage bonus (no repeated reward for revisiting)
+2. edge backtrack penalty (punish A↔B oscillation ONLY)
+3. potential-based shaping toward unswept nodes (no reward cycles)
 4. WAIT action penalty (make waiting truly undesirable)
-5. Distance-based dense rewards to guide exploration
-
-This addresses the catastrophic failure mode where agents loop between 2 nodes.
+5. distance-based dense rewards to guide exploration
 """
 
 import torch
@@ -47,23 +55,7 @@ class ImprovedRewardShaper:
         backtrack_window: int = 5,             # How many recent edges to check
         gamma: float = 0.99,                   # Discount for potential shaping
     ):
-        """
-        Initialize improved reward shaper.
-        
-        Args:
-            scenario: Building scenario ('office', 'daycare', 'warehouse')
-            weight_first_visit: Bonus for visiting unswept node for first time
-            weight_coverage: Reward for sweeping already-visited nodes
-            weight_rescue: Reward for rescuing people
-            weight_hp_loss: Penalty for civilian HP loss
-            weight_backtrack: Penalty for traversing same edge within window
-            weight_wait: Penalty for WAIT action
-            weight_time: Penalty per timestep
-            weight_potential: Weight for potential-based shaping
-            weight_redundancy: Bonus for high-risk room redundancy
-            backtrack_window: Number of recent edges to track for backtrack penalty
-            gamma: Discount factor for potential shaping
-        """
+
         self.scenario = scenario
         self.w_first_visit = weight_first_visit
         self.w_coverage = weight_coverage
@@ -94,8 +86,8 @@ class ImprovedRewardShaper:
         # First-visit tracking
         self.first_visit_nodes: Set[str] = set()
         
-        # Edge backtrack tracking per agent
-        self.agent_recent_edges: Dict[int, List[Tuple[str, str]]] = {}
+        # Edge backtrack tracking per agent (only last edge for immediate backtrack)
+        self.agent_last_edge: Dict[int, Tuple[str, str]] = {}
         
         # Previous agent positions for potential shaping
         self.prev_agent_positions: Dict[int, str] = {}
@@ -111,7 +103,7 @@ class ImprovedRewardShaper:
         self.prev_people_hp = {}
         self.prev_high_risk_rooms_completed = set()
         self.first_visit_nodes = set()
-        self.agent_recent_edges = {}
+        self.agent_last_edge = {}
         self.prev_agent_positions = {}
         self.prev_potential = 0.0
         self.prev_actions = {}
@@ -146,10 +138,12 @@ class ImprovedRewardShaper:
         reward = 0.0
         
         # 1. First-visit coverage bonus
-        reward += self._first_visit_coverage_reward(env)
+        r_first_visit = self._first_visit_coverage_reward(env)
+        reward += r_first_visit
         
-        # 2. Standard coverage reward
-        reward += self._coverage_reward(stats)
+        # 2. Standard coverage reward (ONLY if no first-visit to avoid double counting)
+        if r_first_visit == 0.0:
+            reward += self._coverage_reward(stats)
         
         # 3. Rescue reward
         reward += self._rescue_reward(stats, state)
@@ -196,7 +190,7 @@ class ImprovedRewardShaper:
                     # First time visiting this node!
                     self.first_visit_nodes.add(node.nid)
                     reward += self.w_first_visit
-                    print(f"[FIRST VISIT] Node {node.nid} swept for first time (+{self.w_first_visit:.1f})")
+                    # Debug: print(f"[FIRST VISIT] Node {node.nid} swept for first time (+{self.w_first_visit:.1f})")
         
         return reward
     
@@ -249,9 +243,10 @@ class ImprovedRewardShaper:
     
     def _backtrack_penalty(self, env, actions: Dict[int, str]) -> float:
         """
-        Penalty for traversing the same edge within recent window.
+        Penalty for immediate backtrack (A↔B oscillation).
         
-        This is the CRITICAL anti-loop mechanism - punishes A↔B oscillation.
+        FIXED: Only punishes immediate oscillation (same edge twice in a row).
+        Does NOT punish normal path planning (A→B→C→B is OK).
         """
         penalty = 0.0
         
@@ -267,23 +262,14 @@ class ImprovedRewardShaper:
             # Normalize edge (undirected)
             edge = tuple(sorted([current, target]))
             
-            # Initialize tracking for this agent
-            if agent_id not in self.agent_recent_edges:
-                self.agent_recent_edges[agent_id] = []
-            
-            recent_edges = self.agent_recent_edges[agent_id]
-            
-            # Check if this edge was recently traversed
-            if edge in recent_edges:
+            # Check if this is the SAME edge as last time (immediate backtrack)
+            last_edge = self.agent_last_edge.get(agent_id)
+            if last_edge is not None and last_edge == edge:
                 penalty += self.w_backtrack
-                print(f"[BACKTRACK] Agent {agent_id} revisited edge {edge} ({self.w_backtrack:.1f})")
+                # Debug: print(f"[BACKTRACK] Agent {agent_id} oscillating on edge {edge} ({self.w_backtrack:.1f})")
             
-            # Add to recent edges
-            recent_edges.append(edge)
-            
-            # Keep only last K edges
-            if len(recent_edges) > self.backtrack_window:
-                recent_edges.pop(0)
+            # Store this edge as the last edge for next step
+            self.agent_last_edge[agent_id] = edge
         
         return penalty
     
